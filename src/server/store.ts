@@ -196,9 +196,11 @@ class Store {
     return newOrder;
   }
 
-  public updateOrderStatus(orderId: string, status: OrderStatus, cancellationReason?: string): Order | null {
+  public updateOrderStatus(orderId: string, establishmentId: string, status: OrderStatus, cancellationReason?: string): Order | null {
     this.refreshLocalData();
-    const orderIndex = this.data.orders.findIndex((o) => o.id === orderId);
+    const orderIndex = this.data.orders.findIndex(
+      (o) => o.id === orderId && o.establishmentId === establishmentId
+    );
     if (orderIndex === -1) return null;
 
     const updated = {
@@ -217,10 +219,16 @@ class Store {
   // MenuItem CRUD
   public saveMenuItem(item: MenuItem): MenuItem {
     this.refreshLocalData();
-    const index = this.data.menuItems.findIndex((m) => m.id === item.id);
+    const index = this.data.menuItems.findIndex(
+      (m) => m.id === item.id && m.establishmentId === item.establishmentId
+    );
     if (index !== -1) {
       this.data.menuItems[index] = item;
     } else {
+      const globalIndex = this.data.menuItems.findIndex((m) => m.id === item.id);
+      if (globalIndex !== -1) {
+        throw new Error('ID already in use by another establishment');
+      }
       this.data.menuItems.push(item);
     }
     this.persist();
@@ -230,7 +238,9 @@ class Store {
 
   public deleteMenuItem(itemId: string, establishmentId: string): boolean {
     this.refreshLocalData();
-    const index = this.data.menuItems.findIndex((m) => m.id === itemId);
+    const index = this.data.menuItems.findIndex(
+      (m) => m.id === itemId && m.establishmentId === establishmentId
+    );
     if (index === -1) return false;
     this.data.menuItems.splice(index, 1);
     this.persist();
@@ -241,10 +251,16 @@ class Store {
   // Category CRUD
   public saveCategory(category: Category): Category {
     this.refreshLocalData();
-    const index = this.data.categories.findIndex((c) => c.id === category.id);
+    const index = this.data.categories.findIndex(
+      (c) => c.id === category.id && c.establishmentId === category.establishmentId
+    );
     if (index !== -1) {
       this.data.categories[index] = category;
     } else {
+      const globalIndex = this.data.categories.findIndex((c) => c.id === category.id);
+      if (globalIndex !== -1) {
+        throw new Error('ID already in use by another establishment');
+      }
       this.data.categories.push(category);
     }
     this.persist();
@@ -254,12 +270,16 @@ class Store {
 
   public deleteCategory(categoryId: string, establishmentId: string): boolean {
     this.refreshLocalData();
-    const index = this.data.categories.findIndex((c) => c.id === categoryId);
+    const index = this.data.categories.findIndex(
+      (c) => c.id === categoryId && c.establishmentId === establishmentId
+    );
     if (index === -1) return false;
 
     // Remove cascading items or update their category to none, but let's delete them to keep it clean.
     this.data.categories.splice(index, 1);
-    this.data.menuItems = this.data.menuItems.filter(m => m.categoryId !== categoryId);
+    this.data.menuItems = this.data.menuItems.filter(
+      (m) => !(m.categoryId === categoryId && m.establishmentId === establishmentId)
+    );
     
     this.persist();
     this.notifyClients('MENU_CHANGED', { establishmentId });
@@ -269,10 +289,16 @@ class Store {
   // Table CRUD
   public saveTable(table: Table): Table {
     this.refreshLocalData();
-    const index = this.data.tables.findIndex((t) => t.id === table.id);
+    const index = this.data.tables.findIndex(
+      (t) => t.id === table.id && t.establishmentId === table.establishmentId
+    );
     if (index !== -1) {
       this.data.tables[index] = table;
     } else {
+      const globalIndex = this.data.tables.findIndex((t) => t.id === table.id);
+      if (globalIndex !== -1) {
+        throw new Error('ID already in use by another establishment');
+      }
       this.data.tables.push(table);
     }
     this.persist();
@@ -282,7 +308,9 @@ class Store {
 
   public deleteTable(tableId: string, establishmentId: string): boolean {
     this.refreshLocalData();
-    const index = this.data.tables.findIndex((t) => t.id === tableId);
+    const index = this.data.tables.findIndex(
+      (t) => t.id === tableId && t.establishmentId === establishmentId
+    );
     if (index === -1) return false;
     this.data.tables.splice(index, 1);
     this.persist();

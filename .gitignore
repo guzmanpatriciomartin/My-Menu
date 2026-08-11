@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Runtime JSON datastore (contains order data / customer comments)
+db_temp.json
