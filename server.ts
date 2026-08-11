@@ -13,6 +13,10 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  // Trust exactly ONE reverse proxy (Cloud Run / AI Studio) for X-Forwarded-* so
+  // that req.protocol/req.ip and `secure` cookies work behind TLS termination.
+  // This assumes a single trusted hop in front of us; it becomes required once we
+  // add per-IP rate limiting (which relies on a trustworthy client IP).
   app.set('trust proxy', 1);
 
   // Crucial middlewares
@@ -72,9 +76,9 @@ async function startServer() {
         maxAge: SESSION_TTL_SECONDS * 1000,
       });
 
-      // Never leak the passwordHash.
+      // Respond with the session profile only. The JWT lives exclusively in the
+      // httpOnly cookie and is never exposed to JS (XSS token-theft protection).
       res.json({
-        token,
         email: user.email,
         role: user.role,
         establishmentId: user.establishmentId,
@@ -90,13 +94,9 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  // Current session (rehydration).
+  // Current session (rehydration). Returns the profile only — never the token.
   app.get('/api/auth/me', requireAuth, (req, res) => {
-    const token = req.cookies?.[SESSION_COOKIE] || req.headers.authorization?.replace('Bearer ', '');
-    res.json({
-      ...req.user,
-      token,
-    });
+    res.json(req.user);
   });
 
   // Get establishments — protected: only the caller's own tenant (array of 1).
