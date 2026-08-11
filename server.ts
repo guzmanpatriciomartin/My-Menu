@@ -1,7 +1,13 @@
 import express from 'express';
 import path from 'path';
+import cookieParser from 'cookie-parser';
+import jwt from 'jsonwebtoken';
 import { createServer as createViteServer } from 'vite';
 import { store } from './src/server/store';
+import { findUserByEmail, verifyPassword } from './src/server/users';
+import { requireAuth, requireRole, SECRET, SESSION_COOKIE } from './src/server/auth';
+
+const SESSION_TTL_SECONDS = 8 * 60 * 60; // 8 hours
 
 async function startServer() {
   const app = express();
@@ -9,6 +15,7 @@ async function startServer() {
 
   // Crucial middlewares
   app.use(express.json());
+  app.use(cookieParser());
 
   // SSE client list & endpoint
   app.get('/api/realtime', (req, res) => {
@@ -29,10 +36,69 @@ async function startServer() {
     res.json({ status: 'ok', time: new Date().toISOString() });
   });
 
-  // Get establishments
-  app.get('/api/establishments', (req, res) => {
+  // --- Auth ---
+
+  // Login: validate credentials, issue an 8h httpOnly session cookie.
+  app.post('/api/auth/login', (req, res) => {
     try {
-      res.json(store.getEstablishments());
+      const { email, password } = req.body;
+      if (!email || !password) {
+        return res.status(400).json({ error: 'Email y contraseña son requeridos' });
+      }
+
+      const user = findUserByEmail(email);
+      // Same generic message for unknown email and bad password (no user enumeration).
+      if (!user || !verifyPassword(password, user.passwordHash)) {
+        return res.status(401).json({ error: 'Credenciales inválidas' });
+      }
+
+      const token = jwt.sign(
+        {
+          sub: user.id,
+          email: user.email,
+          role: user.role,
+          establishmentId: user.establishmentId,
+        },
+        SECRET,
+        { expiresIn: SESSION_TTL_SECONDS }
+      );
+
+      res.cookie(SESSION_COOKIE, token, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
+        maxAge: SESSION_TTL_SECONDS * 1000,
+      });
+
+      // Never leak the passwordHash.
+      res.json({
+        email: user.email,
+        role: user.role,
+        establishmentId: user.establishmentId,
+      });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Logout: clear the session cookie.
+  app.post('/api/auth/logout', (req, res) => {
+    res.clearCookie(SESSION_COOKIE);
+    res.json({ success: true });
+  });
+
+  // Current session (rehydration).
+  app.get('/api/auth/me', requireAuth, (req, res) => {
+    res.json(req.user);
+  });
+
+  // Get establishments — protected: only the caller's own tenant (array of 1).
+  app.get('/api/establishments', requireAuth, (req, res) => {
+    try {
+      const own = store
+        .getEstablishments()
+        .filter((e) => e.id === req.user!.establishmentId);
+      res.json(own);
     } catch (e: any) {
       res.status(500).json({ error: e.message });
     }
@@ -85,6 +151,15 @@ async function startServer() {
     }
   });
 
+  // Get orders scoped to the authenticated user's own tenant.
+  app.get('/api/my/orders', requireAuth, (req, res) => {
+    try {
+      res.json(store.getOrders(req.user!.establishmentId));
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
   // Create order
   app.post('/api/orders', (req, res) => {
     try {
@@ -107,14 +182,27 @@ async function startServer() {
   });
 
   // Update order status, with optional cancellationReason
-  app.patch('/api/orders/:id/status', (req, res) => {
+  app.patch('/api/orders/:id/status', requireAuth, (req, res) => {
     try {
       const { status, cancellationReason } = req.body;
       if (!status) {
         return res.status(400).json({ error: 'Status is required' });
       }
 
-      const updated = store.updateOrderStatus(req.params.id, status, cancellationReason);
+      // Ownership check: the order must belong to the caller's tenant.
+      const existing = store.getOrder(req.params.id);
+      if (!existing || existing.establishmentId !== req.user!.establishmentId) {
+        return res.status(404).json({ error: 'Order not found' });
+      }
+
+      // establishmentId comes from the verified session, never the body — consistent
+      // with the tenant-scoped signatures of the other store mutations.
+      const updated = store.updateOrderStatus(
+        req.params.id,
+        req.user!.establishmentId,
+        status,
+        cancellationReason
+      );
       if (!updated) {
         return res.status(404).json({ error: 'Order not found' });
       }
@@ -124,13 +212,17 @@ async function startServer() {
     }
   });
 
-  // Save menu item (Create/Update)
-  app.post('/api/menu-items', (req, res) => {
+  // Save menu item (Create/Update) — admin only, scoped to own tenant.
+  app.post('/api/menu-items', requireAuth, requireRole('admin'), (req, res) => {
     try {
-      const item = req.body;
-      if (!item.id || !item.establishmentId || !item.categoryId || !item.name || item.price === undefined) {
+      const estId = req.user!.establishmentId;
+      // Force tenant from the session; ignore any establishmentId in the payload.
+      const item = { ...req.body, establishmentId: estId };
+      if (!item.id || !item.categoryId || !item.name || item.price === undefined) {
         return res.status(400).json({ error: 'Invalid menu item payload' });
       }
+      // Ownership on update is enforced by the store: it matches id+establishmentId,
+      // and refuses to overwrite a resource owned by another tenant (throws -> 500).
       const saved = store.saveMenuItem(item);
       res.json(saved);
     } catch (e: any) {
@@ -138,11 +230,10 @@ async function startServer() {
     }
   });
 
-  // Delete menu item
-  app.delete('/api/menu-items/:id', (req, res) => {
+  // Delete menu item — admin only, tenant from session.
+  app.delete('/api/menu-items/:id', requireAuth, requireRole('admin'), (req, res) => {
     try {
-      const estId = req.query.establishmentId as string;
-      if (!estId) return res.status(400).json({ error: 'establishmentId is required' });
+      const estId = req.user!.establishmentId;
       const ok = store.deleteMenuItem(req.params.id, estId);
       if (!ok) return res.status(404).json({ error: 'Menu item not found' });
       res.json({ success: true });
@@ -151,13 +242,17 @@ async function startServer() {
     }
   });
 
-  // Save category (Create/Update)
-  app.post('/api/categories', (req, res) => {
+  // Save category (Create/Update) — admin only, scoped to own tenant.
+  app.post('/api/categories', requireAuth, requireRole('admin'), (req, res) => {
     try {
-      const cat = req.body;
-      if (!cat.id || !cat.establishmentId || !cat.name) {
+      const estId = req.user!.establishmentId;
+      // Force tenant from the session; ignore any establishmentId in the payload.
+      const cat = { ...req.body, establishmentId: estId };
+      if (!cat.id || !cat.name) {
         return res.status(400).json({ error: 'Invalid category payload' });
       }
+      // Ownership on update is enforced by the store (id+establishmentId match,
+      // refuses cross-tenant overwrite -> throws -> 500).
       const saved = store.saveCategory(cat);
       res.json(saved);
     } catch (e: any) {
@@ -165,11 +260,10 @@ async function startServer() {
     }
   });
 
-  // Delete category
-  app.delete('/api/categories/:id', (req, res) => {
+  // Delete category — admin only, tenant from session.
+  app.delete('/api/categories/:id', requireAuth, requireRole('admin'), (req, res) => {
     try {
-      const estId = req.query.establishmentId as string;
-      if (!estId) return res.status(400).json({ error: 'establishmentId is required' });
+      const estId = req.user!.establishmentId;
       const ok = store.deleteCategory(req.params.id, estId);
       if (!ok) return res.status(404).json({ error: 'Category not found' });
       res.json({ success: true });
@@ -178,13 +272,17 @@ async function startServer() {
     }
   });
 
-  // Save table (Create/Update)
-  app.post('/api/tables', (req, res) => {
+  // Save table (Create/Update) — admin only, scoped to own tenant.
+  app.post('/api/tables', requireAuth, requireRole('admin'), (req, res) => {
     try {
-      const tab = req.body;
-      if (!tab.id || !tab.establishmentId || !tab.name) {
+      const estId = req.user!.establishmentId;
+      // Force tenant from the session; ignore any establishmentId in the payload.
+      const tab = { ...req.body, establishmentId: estId };
+      if (!tab.id || !tab.name) {
         return res.status(400).json({ error: 'Invalid table payload' });
       }
+      // Ownership on update is enforced by the store (id+establishmentId match,
+      // refuses cross-tenant overwrite -> throws -> 500).
       const saved = store.saveTable(tab);
       res.json(saved);
     } catch (e: any) {
@@ -192,11 +290,10 @@ async function startServer() {
     }
   });
 
-  // Delete table
-  app.delete('/api/tables/:id', (req, res) => {
+  // Delete table — admin only, tenant from session.
+  app.delete('/api/tables/:id', requireAuth, requireRole('admin'), (req, res) => {
     try {
-      const estId = req.query.establishmentId as string;
-      if (!estId) return res.status(400).json({ error: 'establishmentId is required' });
+      const estId = req.user!.establishmentId;
       const ok = store.deleteTable(req.params.id, estId);
       if (!ok) return res.status(404).json({ error: 'Table not found' });
       res.json({ success: true });

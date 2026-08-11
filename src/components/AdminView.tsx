@@ -35,9 +35,13 @@ interface AdminViewProps {
   onBackToLauncher: () => void;
 }
 
+// Session shape returned by the server (/api/auth/login and /api/auth/me).
+// The tenant (establishmentId) is authoritative and cannot be changed client-side.
+type AuthMe = Pick<UserSession, 'email' | 'role' | 'establishmentId'>;
+
 export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   // Authentication state
-  const [currentUser, setCurrentUser] = useState<UserSession | null>(null);
+  const [currentUser, setCurrentUser] = useState<AuthMe | null>(null);
   const [loginEmail, setLoginEmail] = useState('carolina@mimenu.com');
   const [loginPassword, setLoginPassword] = useState('admin');
   const [loginError, setLoginError] = useState('');
@@ -83,51 +87,73 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   // Store pre-played order count to detect new orders and synthesize chime
   const orderCountRef = useRef<number>(0);
 
-  // Dummy login profiles (RF-A01, RF-A13 role validation)
-  const handleLogin = (e: React.FormEvent) => {
+  // Real auth against the server (RF-A01, RF-A13 role validation).
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (loginEmail === 'carolina@mimenu.com' && loginPassword === 'admin') {
-      const session: UserSession = {
-        id: 'usr-1',
-        email: 'carolina@mimenu.com',
-        name: 'Carolina (Dueña)',
-        role: 'admin',
-        establishmentId: 'bodegon-palermo'
-      };
-      setCurrentUser(session);
-      setActiveEstId(session.establishmentId);
-      setLoginError('');
-    } else if (loginEmail === 'tomas@mimenu.com' && loginPassword === 'mesero') {
-      const session: UserSession = {
-        id: 'usr-2',
-        email: 'tomas@mimenu.com',
-        name: 'Tomás (Mesero)',
-        role: 'waiter',
-        establishmentId: 'bodegon-palermo'
-      };
-      setCurrentUser(session);
-      setActiveEstId(session.establishmentId);
-      setActiveTab('pedidos'); // Waiter only access orders
-      setLoginError('');
-    } else {
-      setLoginError('Credenciales incorrectas de demostración. Usa los valores pre-cargados.');
+    setLoginError('');
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ email: loginEmail, password: loginPassword }),
+      });
+      if (!res.ok) {
+        setLoginError('Credenciales inválidas.');
+        return;
+      }
+      const me: AuthMe = await res.json();
+      setCurrentUser(me);
+      setActiveEstId(me.establishmentId);
+      if (me.role === 'waiter') setActiveTab('pedidos'); // Waiter only accesses orders
+    } catch (err) {
+      console.error('Login failed', err);
+      setLoginError('No se pudo conectar con el servidor.');
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+    } catch (err) {
+      console.error('Logout failed', err);
+    }
     setCurrentUser(null);
   };
+
+  // Rehydrate the session on mount from the httpOnly cookie; if 401, show login.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/auth/me', { credentials: 'include' });
+        if (!cancelled && res.ok) {
+          const me: AuthMe = await res.json();
+          setCurrentUser(me);
+          setActiveEstId(me.establishmentId);
+          if (me.role === 'waiter') setActiveTab('pedidos');
+        }
+      } catch (err) {
+        // Not authenticated — the login screen will render.
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Fetch all DB state elements for active establishment
   const fetchDbState = async () => {
     if (!currentUser) return;
     try {
       const [estRes, catRes, menuRes, tabRes, ordRes] = await Promise.all([
-        fetch('/api/establishments').then(r => r.json()),
-        fetch(`/api/establishments/${activeEstId}/categories`).then(r => r.json()),
-        fetch(`/api/establishments/${activeEstId}/menu-items`).then(r => r.json()),
-        fetch(`/api/establishments/${activeEstId}/tables`).then(r => r.json()),
-        fetch(`/api/establishments/${activeEstId}/orders`).then(r => r.json())
+        fetch('/api/establishments', { credentials: 'include' }).then(r => r.json()),
+        fetch(`/api/establishments/${activeEstId}/categories`, { credentials: 'include' }).then(r => r.json()),
+        fetch(`/api/establishments/${activeEstId}/menu-items`, { credentials: 'include' }).then(r => r.json()),
+        fetch(`/api/establishments/${activeEstId}/tables`, { credentials: 'include' }).then(r => r.json()),
+        fetch('/api/my/orders', { credentials: 'include' }).then(r => r.json())
       ]);
 
       setEstablishments(estRes);
@@ -201,6 +227,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       const res = await fetch(`/api/orders/${order.id}/status`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ status: nextStatus })
       });
       if (res.ok) {
@@ -224,9 +251,10 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       const res = await fetch(`/api/orders/${selectedOrder.id}/status`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
+        credentials: 'include',
+        body: JSON.stringify({
           status: 'Cancelado',
-          cancellationReason: cancellationReason.trim() || 'Cancelado por el establecimiento' 
+          cancellationReason: cancellationReason.trim() || 'Cancelado por el establecimiento'
         })
       });
 
@@ -243,6 +271,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
           await fetch('/api/menu-items', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify(payload)
           });
         }
@@ -279,6 +308,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       const res = await fetch('/api/menu-items', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(payload)
       });
       if (res.ok) {
@@ -294,8 +324,9 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   const handleDeleteMenuItem = async (itemId: string) => {
     if (!confirm('¿Seguro que deseas eliminar este ítem? La acción es irreversible.')) return;
     try {
-      const res = await fetch(`/api/menu-items/${itemId}?establishmentId=${activeEstId}`, {
-        method: 'DELETE'
+      const res = await fetch(`/api/menu-items/${itemId}`, {
+        method: 'DELETE',
+        credentials: 'include'
       });
       if (res.ok) fetchDbState();
     } catch (e) {
@@ -319,6 +350,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       const res = await fetch('/api/categories', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(payload)
       });
       if (res.ok) {
@@ -334,8 +366,9 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   const handleDeleteCategory = async (catId: string) => {
     if (!confirm('¿Eliminar esta categoría? Esto borrará también los ítems asignados a ella.')) return;
     try {
-      const res = await fetch(`/api/categories/${catId}?establishmentId=${activeEstId}`, {
-        method: 'DELETE'
+      const res = await fetch(`/api/categories/${catId}`, {
+        method: 'DELETE',
+        credentials: 'include'
       });
       if (res.ok) fetchDbState();
     } catch (e) {
@@ -359,6 +392,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       const res = await fetch('/api/tables', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify(payload)
       });
       if (res.ok) {
@@ -374,8 +408,9 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   const handleDeleteTable = async (tableId: string) => {
     if (!confirm('¿Seguro quieres eliminar esta mesa?')) return;
     try {
-      const res = await fetch(`/api/tables/${tableId}?establishmentId=${activeEstId}`, {
-        method: 'DELETE'
+      const res = await fetch(`/api/tables/${tableId}`, {
+        method: 'DELETE',
+        credentials: 'include'
       });
       if (res.ok) fetchDbState();
     } catch (e) {
@@ -618,30 +653,24 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               <h1 className="text-sm font-black tracking-widest text-white uppercase flex items-center">
                 Mi Menú · Panel
                 <span className="ml-2.5 text-[9px] bg-zinc-900 text-zinc-300 border border-zinc-800 px-2 py-0.5 rounded-none font-mono font-bold tracking-widest uppercase">
-                  {currentUser.role === 'admin' ? 'Carolina (Dueña)' : 'Tomás (Mesero)'}
+                  {currentUser.email} · {currentUser.role === 'admin' ? 'Admin' : 'Mesero'}
                 </span>
               </h1>
             </div>
           </div>
 
-          {/* Swith active establishment tenant selector (RF-A11) */}
+          {/* Active establishment — fixed to the authenticated tenant, not switchable (RF-A11) */}
           <div className="flex items-center gap-2">
             <span className="text-[10px] text-zinc-500 font-mono uppercase bg-zinc-950 border border-zinc-850 py-1.5 px-3.5 rounded-none flex items-center tracking-wider">
               <MapPin className="w-3.5 h-3.5 mr-1.5 text-zinc-400" />
               Establecimiento Activo:
             </span>
-            <select
-              id="establishment-filter-selector"
-              value={activeEstId}
-              onChange={(e) => setActiveEstId(e.target.value)}
-              className="bg-zinc-950 border border-zinc-850 text-xs px-3 py-2 rounded-none text-white focus:outline-none focus:border-white font-bold cursor-pointer"
+            <span
+              id="establishment-active-label"
+              className="bg-zinc-950 border border-zinc-850 text-xs px-3 py-2 rounded-none text-white font-bold"
             >
-              {establishments.map((est) => (
-                <option key={est.id} value={est.id}>
-                  {est.name}
-                </option>
-              ))}
-            </select>
+              {activeEstablishment?.name || activeEstId}
+            </span>
           </div>
 
           <div className="flex items-center gap-3 self-end md:self-auto">
@@ -1149,6 +1178,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                                     await fetch('/api/menu-items', {
                                       method: 'POST',
                                       headers: { 'Content-Type': 'application/json' },
+                                      credentials: 'include',
                                       body: JSON.stringify(payload)
                                     });
                                     fetchDbState();
