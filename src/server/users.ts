@@ -37,7 +37,8 @@ export function verifyPassword(password: string, stored: string): boolean {
 // here so the raw passwords never live in source.
 //   carolina@mimenu.com -> 'admin'  (admin,  bodegon-palermo)
 //   tomas@mimenu.com    -> 'mesero' (waiter, bodegon-palermo)
-//   martin@mimenu.com   -> 'admin'  (admin,  cafe-speakeasy)  // demonstrates tenant isolation
+//   martin@mimenu.com   -> 'admin'  (admin,  cafe-speakeasy)
+//   sofia@mimenu.com    -> 'mesero' (waiter, cafe-speakeasy)
 export const seedUsers: ServerUser[] = [
   {
     id: 'usr-1',
@@ -61,6 +62,14 @@ export const seedUsers: ServerUser[] = [
     passwordHash:
       '11ce4423b7f48a295fb2674e98eac0bf:5f7760391a8e129b1cbe39c31acef742173345aa245c1133447a1250a88c824ecd737cb366b24e8669048b06ba8f22fda971eeb3a07ba86ff21b320437b6fd9a',
     role: 'admin',
+    establishmentId: 'cafe-speakeasy',
+  },
+  {
+    id: 'usr-4',
+    email: 'sofia@mimenu.com',
+    passwordHash:
+      '83e1b4aabf59f9257586711274495848:d98c914480c71806325368587d291a9a7d97140d6a3b0b0272fc0d47a16af1db4be411dd5576f4c727b8a67d4e29660ba4a4f8e82e2ceba9e05d2f3a665f5626',
+    role: 'waiter',
     establishmentId: 'cafe-speakeasy',
   },
 ];

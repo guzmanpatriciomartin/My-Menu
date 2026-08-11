@@ -43,9 +43,17 @@ interface SessionClaims {
   establishmentId: string;
 }
 
-// Verify the session cookie and populate req.user; 401 on missing/invalid token.
+// Verify the session cookie or Authorization header and populate req.user; 401 on missing/invalid token.
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  const token = req.cookies?.[SESSION_COOKIE];
+  let token = req.cookies?.[SESSION_COOKIE];
+
+  if (!token && req.headers.authorization) {
+    const authHeader = req.headers.authorization;
+    if (authHeader.startsWith('Bearer ')) {
+      token = authHeader.substring(7);
+    }
+  }
+
   if (!token) {
     res.status(401).json({ error: 'No autenticado' });
     return;

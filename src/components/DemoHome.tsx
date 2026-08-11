@@ -189,19 +189,17 @@ export default function DemoHome({ onLaunchClient, onLaunchAdmin }: DemoHomeProp
                 ACCESOS PRECARGADOS PARA TESTS:
               </p>
               
-              <div className="space-y-3.5">
+              <div className="space-y-3">
                 <div>
-                  <p className="text-white font-black tracking-wide uppercase text-[10px]">1. ROL ADMIN (CAROLINA):</p>
-                  <p className="mt-0.5">Email: <span className="text-amber-500 font-bold">carolina@mimenu.com</span></p>
-                  <p>Contraseña: <span className="text-zinc-300 font-bold">admin</span></p>
-                  <p className="text-[10px] text-zinc-500 mt-1 font-sans font-medium">Control absoluto del catálogo de menú, mesas y QRs.</p>
+                  <p className="text-amber-500 font-black tracking-wide uppercase text-[10px]">🍷 EL BODEGÓN DE PALERMO:</p>
+                  <p className="mt-0.5 text-zinc-300">Admin (Carolina): <span className="text-white font-bold">carolina@mimenu.com</span> / <span className="text-zinc-400">admin</span></p>
+                  <p className="text-zinc-300">Mesero (Tomás): <span className="text-white font-bold">tomas@mimenu.com</span> / <span className="text-zinc-400">mesero</span></p>
                 </div>
 
-                <div className="pt-2.5 border-t border-zinc-800/80">
-                  <p className="text-white font-black tracking-wide uppercase text-[10px]">2. ROL MESERO (TOMÁS):</p>
-                  <p className="mt-0.5">Email: <span className="text-indigo-400 font-bold">tomas@mimenu.com</span></p>
-                  <p>Contraseña: <span className="text-zinc-300 font-bold">mesero</span></p>
-                  <p className="text-[10px] text-zinc-500 mt-1 font-sans font-medium">Acceso exclusivo a comandas; Menú y Mesas bloqueados.</p>
+                <div className="pt-2 border-t border-zinc-800/80">
+                  <p className="text-amber-500 font-black tracking-wide uppercase text-[10px]">☕ CAFÉ & CO. SPEAKEASY:</p>
+                  <p className="mt-0.5 text-zinc-300">Admin (Martín): <span className="text-white font-bold">martin@mimenu.com</span> / <span className="text-zinc-400">admin</span></p>
+                  <p className="text-zinc-300">Mesera (Sofía): <span className="text-white font-bold">sofia@mimenu.com</span> / <span className="text-zinc-400">mesero</span></p>
                 </div>
               </div>
             </div>

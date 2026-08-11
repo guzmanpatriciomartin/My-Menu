@@ -26,7 +26,8 @@ import {
   ShoppingBag,
   ExternalLink,
   ShieldAlert,
-  CheckCircle
+  CheckCircle,
+  RefreshCw
 } from 'lucide-react';
 import { Establishment, Category, MenuItem, Table, Order, OrderStatus, UserSession, UserRole } from '../types';
 import { playNewOrderSound, playAlertSound } from './SoundUtility';
@@ -37,7 +38,12 @@ interface AdminViewProps {
 
 // Session shape returned by the server (/api/auth/login and /api/auth/me).
 // The tenant (establishmentId) is authoritative and cannot be changed client-side.
-type AuthMe = Pick<UserSession, 'email' | 'role' | 'establishmentId'>;
+type AuthMe = Pick<UserSession, 'email' | 'role' | 'establishmentId'> & { token?: string };
+
+const getAuthHeaders = (): Record<string, string> => {
+  const token = localStorage.getItem('mimenu_token');
+  return token ? { 'Authorization': `Bearer ${token}` } : {};
+};
 
 export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   // Authentication state
@@ -45,6 +51,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   const [loginEmail, setLoginEmail] = useState('carolina@mimenu.com');
   const [loginPassword, setLoginPassword] = useState('admin');
   const [loginError, setLoginError] = useState('');
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // Active tenant
   const [activeEstId, setActiveEstId] = useState<string>('bodegon-palermo');
@@ -88,47 +95,62 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   const orderCountRef = useRef<number>(0);
 
   // Real auth against the server (RF-A01, RF-A13 role validation).
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const doLogin = async (emailToUse: string, passwordToUse: string) => {
     setLoginError('');
+    setIsLoggingIn(true);
     try {
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ email: loginEmail, password: loginPassword }),
+        body: JSON.stringify({ email: emailToUse, password: passwordToUse }),
       });
       if (!res.ok) {
         setLoginError('Credenciales inválidas.');
         return;
       }
       const me: AuthMe = await res.json();
+      if (me.token) {
+        localStorage.setItem('mimenu_token', me.token);
+      }
       setCurrentUser(me);
       setActiveEstId(me.establishmentId);
       if (me.role === 'waiter') setActiveTab('pedidos'); // Waiter only accesses orders
     } catch (err) {
       console.error('Login failed', err);
       setLoginError('No se pudo conectar con el servidor.');
+    } finally {
+      setIsLoggingIn(false);
     }
+  };
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await doLogin(loginEmail, loginPassword);
   };
 
   const handleLogout = async () => {
     try {
-      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include', headers: getAuthHeaders() });
     } catch (err) {
       console.error('Logout failed', err);
     }
+    localStorage.removeItem('mimenu_token');
     setCurrentUser(null);
   };
 
-  // Rehydrate the session on mount from the httpOnly cookie; if 401, show login.
+  // Rehydrate the session on mount from the httpOnly cookie or stored Bearer token; if 401, show login.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch('/api/auth/me', { credentials: 'include' });
+        const headers = getAuthHeaders();
+        const res = await fetch('/api/auth/me', { credentials: 'include', headers });
         if (!cancelled && res.ok) {
           const me: AuthMe = await res.json();
+          if (me.token) {
+            localStorage.setItem('mimenu_token', me.token);
+          }
           setCurrentUser(me);
           setActiveEstId(me.establishmentId);
           if (me.role === 'waiter') setActiveTab('pedidos');
@@ -147,23 +169,27 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   // Fetch all DB state elements for active establishment
   const fetchDbState = async () => {
     if (!currentUser) return;
+    const estId = currentUser.establishmentId;
     try {
+      const headers = getAuthHeaders();
       const [estRes, catRes, menuRes, tabRes, ordRes] = await Promise.all([
-        fetch('/api/establishments', { credentials: 'include' }).then(r => r.json()),
-        fetch(`/api/establishments/${activeEstId}/categories`, { credentials: 'include' }).then(r => r.json()),
-        fetch(`/api/establishments/${activeEstId}/menu-items`, { credentials: 'include' }).then(r => r.json()),
-        fetch(`/api/establishments/${activeEstId}/tables`, { credentials: 'include' }).then(r => r.json()),
-        fetch('/api/my/orders', { credentials: 'include' }).then(r => r.json())
+        fetch('/api/establishments', { credentials: 'include', headers }).then(r => r.json()),
+        fetch(`/api/establishments/${estId}/categories`, { credentials: 'include', headers }).then(r => r.json()),
+        fetch(`/api/establishments/${estId}/menu-items`, { credentials: 'include', headers }).then(r => r.json()),
+        fetch(`/api/establishments/${estId}/tables`, { credentials: 'include', headers }).then(r => r.json()),
+        fetch('/api/my/orders', { credentials: 'include', headers }).then(r => r.json())
       ]);
 
-      setEstablishments(estRes);
-      setCategories(catRes);
-      setMenuItems(menuRes);
-      setTables(tabRes);
-      setOrders(ordRes);
+      if (Array.isArray(estRes)) setEstablishments(estRes);
+      if (Array.isArray(catRes)) setCategories(catRes);
+      if (Array.isArray(menuRes)) setMenuItems(menuRes);
+      if (Array.isArray(tabRes)) setTables(tabRes);
+      if (Array.isArray(ordRes)) setOrders(ordRes);
 
       // Sound notification triggers on new orders count raising (RF-A03)
-      const currentReceivedOrders = ordRes.filter((o: Order) => o.status === 'Recibido').length;
+      const currentReceivedOrders = Array.isArray(ordRes)
+        ? ordRes.filter((o: Order) => o.status === 'Recibido').length
+        : 0;
       if (orderCountRef.current !== null && currentReceivedOrders > orderCountRef.current) {
         if (soundEnabled) {
           playNewOrderSound();
@@ -226,7 +252,10 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     try {
       const res = await fetch(`/api/orders/${order.id}/status`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders()
+        },
         credentials: 'include',
         body: JSON.stringify({ status: nextStatus })
       });
@@ -250,7 +279,10 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       // 1. Cancel Order request
       const res = await fetch(`/api/orders/${selectedOrder.id}/status`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders()
+        },
         credentials: 'include',
         body: JSON.stringify({
           status: 'Cancelado',
@@ -261,7 +293,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       if (!res.ok) throw new Error('Failed to cancel order');
 
       // 2. If an item was toggled as cause, disable it immediately! (RF-A07)
-      if (disableItemOnCancelId) {
+      if (disableItemOnCancelId && currentUser?.role === 'admin') {
         const itemToDisable = menuItems.find(m => m.id === disableItemOnCancelId);
         if (itemToDisable) {
           const payload = {
@@ -270,7 +302,10 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
           };
           await fetch('/api/menu-items', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              ...getAuthHeaders()
+            },
             credentials: 'include',
             body: JSON.stringify(payload)
           });
@@ -307,7 +342,10 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     try {
       const res = await fetch('/api/menu-items', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders()
+        },
         credentials: 'include',
         body: JSON.stringify(payload)
       });
@@ -326,6 +364,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     try {
       const res = await fetch(`/api/menu-items/${itemId}`, {
         method: 'DELETE',
+        headers: getAuthHeaders(),
         credentials: 'include'
       });
       if (res.ok) fetchDbState();
@@ -349,7 +388,10 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     try {
       const res = await fetch('/api/categories', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders()
+        },
         credentials: 'include',
         body: JSON.stringify(payload)
       });
@@ -368,6 +410,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     try {
       const res = await fetch(`/api/categories/${catId}`, {
         method: 'DELETE',
+        headers: getAuthHeaders(),
         credentials: 'include'
       });
       if (res.ok) fetchDbState();
@@ -391,7 +434,10 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     try {
       const res = await fetch('/api/tables', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAuthHeaders()
+        },
         credentials: 'include',
         body: JSON.stringify(payload)
       });
@@ -410,6 +456,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     try {
       const res = await fetch(`/api/tables/${tableId}`, {
         method: 'DELETE',
+        headers: getAuthHeaders(),
         credentials: 'include'
       });
       if (res.ok) fetchDbState();
@@ -540,15 +587,49 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     img.src = qrUrl;
   };
 
-  // Mock authenticated login loader
+  // Authenticated login screen with multi-tenant account selection
   if (!currentUser) {
+    const demoAccounts = [
+      {
+        tenant: 'El Bodegón de Palermo',
+        tenantId: 'bodegon-palermo',
+        badge: '🍷 Bodegón',
+        accounts: [
+          { name: 'Carolina', role: 'Admin / Dueña', email: 'carolina@mimenu.com', pass: 'admin', key: 'carolina' },
+          { name: 'Tomás', role: 'Mesero', email: 'tomas@mimenu.com', pass: 'mesero', key: 'tomas' },
+        ]
+      },
+      {
+        tenant: 'Café & Co. Speakeasy',
+        tenantId: 'cafe-speakeasy',
+        badge: '☕ Café Speakeasy',
+        accounts: [
+          { name: 'Martín', role: 'Admin / Encargado', email: 'martin@mimenu.com', pass: 'admin', key: 'martin' },
+          { name: 'Sofía', role: 'Mesera', email: 'sofia@mimenu.com', pass: 'mesero', key: 'sofia' },
+        ]
+      }
+    ];
+
+    const fillAndLogin = (email: string, pass: string) => {
+      setLoginEmail(email);
+      setLoginPassword(pass);
+      setLoginError('');
+      doLogin(email, pass);
+    };
+
+    let selectedUserKey = '';
+    if (loginEmail === 'carolina@mimenu.com') selectedUserKey = 'carolina';
+    else if (loginEmail === 'tomas@mimenu.com') selectedUserKey = 'tomas';
+    else if (loginEmail === 'martin@mimenu.com') selectedUserKey = 'martin';
+    else if (loginEmail === 'sofia@mimenu.com') selectedUserKey = 'sofia';
+
     return (
       <div className="min-h-screen bg-zinc-950 flex flex-col items-center justify-center p-6 selection:bg-amber-500 selection:text-zinc-950 font-sans">
         <div id="login-container" className="max-w-md w-full bg-zinc-900 border border-zinc-800 rounded-none p-8 relative overflow-hidden">
           
           <div className="absolute top-0 left-0 right-0 h-1 bg-white"></div>
 
-          <div className="text-center mb-8">
+          <div className="text-center mb-6">
             <h1 className="text-xl font-black text-white tracking-widest flex items-center justify-center space-x-2.5 uppercase">
               <ClipboardList className="w-5 h-5 text-white" />
               <span>Mi Menu · Gestión</span>
@@ -558,27 +639,33 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
             </p>
           </div>
 
-          <form onSubmit={handleLogin} className="space-y-6">
+          <form onSubmit={handleLogin} className="space-y-5">
             <div>
               <label className="block text-[10px] font-black text-zinc-300 uppercase tracking-widest mb-2 font-mono">
-                Usuario de Demostración
+                Seleccionar Establecimiento & Cuenta
               </label>
               <select
                 id="demo-user-selector"
-                className="w-full bg-zinc-950 border border-zinc-800 p-3.5 rounded-none text-xs text-zinc-200 focus:outline-none focus:border-white font-mono uppercase tracking-wide cursor-pointer"
+                value={selectedUserKey}
+                disabled={isLoggingIn}
+                className="w-full bg-zinc-950 border border-zinc-800 p-3.5 rounded-none text-xs text-zinc-200 focus:outline-none focus:border-white font-mono uppercase tracking-wide cursor-pointer disabled:opacity-50"
                 onChange={(e) => {
                   const val = e.target.value;
-                  if (val === 'carolina') {
-                    setLoginEmail('carolina@mimenu.com');
-                    setLoginPassword('admin');
-                  } else {
-                    setLoginEmail('tomas@mimenu.com');
-                    setLoginPassword('mesero');
-                  }
+                  if (val === 'carolina') fillAndLogin('carolina@mimenu.com', 'admin');
+                  else if (val === 'tomas') fillAndLogin('tomas@mimenu.com', 'mesero');
+                  else if (val === 'martin') fillAndLogin('martin@mimenu.com', 'admin');
+                  else if (val === 'sofia') fillAndLogin('sofia@mimenu.com', 'mesero');
                 }}
               >
-                <option value="carolina">Carolina (Admin / Dueña)</option>
-                <option value="tomas">Tomás (Mesero / Waiter)</option>
+                <option value="" disabled>-- Selecciona un usuario --</option>
+                <optgroup label="🍷 El Bodegón de Palermo">
+                  <option value="carolina">Carolina (Admin / Dueña)</option>
+                  <option value="tomas">Tomás (Mesero)</option>
+                </optgroup>
+                <optgroup label="☕ Café & Co. Speakeasy">
+                  <option value="martin">Martín (Admin - Café & Co.)</option>
+                  <option value="sofia">Sofía (Mesera - Café & Co.)</option>
+                </optgroup>
               </select>
             </div>
 
@@ -591,7 +678,8 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 type="email"
                 value={loginEmail}
                 onChange={(e) => setLoginEmail(e.target.value)}
-                className="w-full bg-zinc-950 border border-zinc-800 p-3.5 rounded-none text-xs text-zinc-200 focus:outline-none focus:border-white font-medium"
+                disabled={isLoggingIn}
+                className="w-full bg-zinc-950 border border-zinc-800 p-3.5 rounded-none text-xs text-zinc-200 focus:outline-none focus:border-white font-medium disabled:opacity-50"
                 required
               />
             </div>
@@ -605,7 +693,8 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 type="password"
                 value={loginPassword}
                 onChange={(e) => setLoginPassword(e.target.value)}
-                className="w-full bg-zinc-950 border border-zinc-800 p-3.5 rounded-none text-xs text-zinc-200 focus:outline-none focus:border-white font-mono"
+                disabled={isLoggingIn}
+                className="w-full bg-zinc-950 border border-zinc-800 p-3.5 rounded-none text-xs text-zinc-200 focus:outline-none focus:border-white font-mono disabled:opacity-50"
                 required
               />
             </div>
@@ -620,13 +709,54 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
             <button
               id="btn-login"
               type="submit"
-              className="w-full py-4 rounded-none font-black text-xs text-black bg-white hover:bg-zinc-200 uppercase tracking-[0.2em] cursor-pointer transition-all"
+              disabled={isLoggingIn}
+              className="w-full py-4 rounded-none font-black text-xs text-black bg-white hover:bg-zinc-200 uppercase tracking-[0.2em] cursor-pointer transition-all disabled:opacity-50 flex items-center justify-center space-x-2"
             >
-              Acceder al Panel Admin
+              {isLoggingIn ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin text-black" />
+                  <span>Ingresando...</span>
+                </>
+              ) : (
+                <span>Acceder al Panel Admin</span>
+              )}
             </button>
           </form>
 
-          <div className="mt-8 pt-6 border-t border-zinc-800/80 flex items-center justify-between text-[10px] text-zinc-550 font-mono uppercase tracking-wider">
+          {/* Direct Tenant Quick Selection Buttons */}
+          <div className="mt-6 pt-5 border-t border-zinc-800/80 space-y-3">
+            <p className="text-[10px] font-black text-zinc-400 uppercase tracking-widest font-mono">
+              Acceso Rápido por Establecimiento:
+            </p>
+            <div className="space-y-3">
+              {demoAccounts.map((group) => (
+                <div key={group.tenantId} className="bg-zinc-950 border border-zinc-800/80 p-3 space-y-2">
+                  <span className="text-[10px] font-bold text-amber-500 font-mono uppercase tracking-wider block">
+                    {group.badge} — {group.tenant}
+                  </span>
+                  <div className="grid grid-cols-2 gap-2">
+                    {group.accounts.map((acc) => (
+                      <button
+                        key={acc.key}
+                        type="button"
+                        onClick={() => fillAndLogin(acc.email, acc.pass)}
+                        className={`text-left p-2 border transition text-[10px] font-mono cursor-pointer ${
+                          loginEmail === acc.email
+                            ? 'bg-zinc-800 border-white text-white font-bold'
+                            : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-700'
+                        }`}
+                      >
+                        <p className="text-white font-bold">{acc.name} ({acc.role})</p>
+                        <p className="text-[9px] text-zinc-500 truncate">{acc.email}</p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="mt-6 pt-4 border-t border-zinc-800/80 flex items-center justify-between text-[10px] text-zinc-550 font-mono uppercase tracking-wider">
             <span>MVP v0.2</span>
             <button 
               onClick={onBackToLauncher}

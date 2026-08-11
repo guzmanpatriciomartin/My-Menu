@@ -13,6 +13,8 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  app.set('trust proxy', 1);
+
   // Crucial middlewares
   app.use(express.json());
   app.use(cookieParser());
@@ -72,6 +74,7 @@ async function startServer() {
 
       // Never leak the passwordHash.
       res.json({
+        token,
         email: user.email,
         role: user.role,
         establishmentId: user.establishmentId,
@@ -89,7 +92,11 @@ async function startServer() {
 
   // Current session (rehydration).
   app.get('/api/auth/me', requireAuth, (req, res) => {
-    res.json(req.user);
+    const token = req.cookies?.[SESSION_COOKIE] || req.headers.authorization?.replace('Bearer ', '');
+    res.json({
+      ...req.user,
+      token,
+    });
   });
 
   // Get establishments — protected: only the caller's own tenant (array of 1).
