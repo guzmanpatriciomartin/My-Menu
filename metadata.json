@@ -1,0 +1,6 @@
+{
+  "name": "Mi Menu - Check Table",
+  "description": "Digitalización de pedidos por QR para bares y restaurantes con panel de administración en tiempo real y soporte multi-tenant.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
