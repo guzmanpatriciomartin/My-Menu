@@ -33,6 +33,12 @@ export function verifyPassword(password: string, stored: string): boolean {
   return crypto.timingSafeEqual(storedBuf, derivedBuf);
 }
 
+// MED-2: precomputed dummy hash (valid format, no real account) used to run the SAME
+// scrypt work when the email does not exist, so login timing does not reveal whether
+// an account exists. The plaintext behind it is random and never used.
+export const DUMMY_PASSWORD_HASH =
+  '6f3f3a1600ccde49f159673ff7c65f63:c1fc19843df8787d0e612b45a44828b7098b14cca00da6a9414476bcd21fd86c78529e9587d015832be3e0f24378ef546328ea8e4c64d098ae630d935bf89933';
+
 // Seed users. Password hashes were generated once with hashPassword() and pasted
 // here so the raw passwords never live in source.
 //   carolina@mimenu.com -> 'admin'  (admin,  bodegon-palermo)
