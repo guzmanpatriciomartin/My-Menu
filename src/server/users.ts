@@ -68,7 +68,7 @@ export const seedUsers: ServerUser[] = [
     id: 'usr-4',
     email: 'sofia@mimenu.com',
     passwordHash:
-      '83e1b4aabf59f9257586711274495848:d98c914480c71806325368587d291a9a7d97140d6a3b0b0272fc0d47a16af1db4be411dd5576f4c727b8a67d4e29660ba4a4f8e82e2ceba9e05d2f3a665f5626',
+      '4f8e1abb014cf4dae078dbf565e4ed82:5d7f66bc8e510626d8728f887c1ee35de758020fed5d34d413a5e83b3c0035c4c08bc2ad96e7c2cfd38bc1f5ea57ea773b63831836e5fc380a64b9fd1428c484',
     role: 'waiter',
     establishmentId: 'cafe-speakeasy',
   },

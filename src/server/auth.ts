@@ -44,6 +44,10 @@ interface SessionClaims {
 }
 
 // Verify the session cookie or Authorization header and populate req.user; 401 on missing/invalid token.
+// The web frontend authenticates ONLY via the httpOnly session cookie — the token is
+// never returned to the browser (XSS token-theft protection). The Authorization: Bearer
+// path exists purely for external/programmatic API clients that obtain a token by other
+// means; it must NOT be used from the web frontend.
 export function requireAuth(req: Request, res: Response, next: NextFunction): void {
   let token = req.cookies?.[SESSION_COOKIE];
 

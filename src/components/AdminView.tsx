@@ -38,12 +38,8 @@ interface AdminViewProps {
 
 // Session shape returned by the server (/api/auth/login and /api/auth/me).
 // The tenant (establishmentId) is authoritative and cannot be changed client-side.
-type AuthMe = Pick<UserSession, 'email' | 'role' | 'establishmentId'> & { token?: string };
-
-const getAuthHeaders = (): Record<string, string> => {
-  const token = localStorage.getItem('mimenu_token');
-  return token ? { 'Authorization': `Bearer ${token}` } : {};
-};
+// The session token is NEVER exposed to JS: auth rides only on the httpOnly cookie.
+type AuthMe = Pick<UserSession, 'email' | 'role' | 'establishmentId'>;
 
 export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   // Authentication state
@@ -110,9 +106,6 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
         return;
       }
       const me: AuthMe = await res.json();
-      if (me.token) {
-        localStorage.setItem('mimenu_token', me.token);
-      }
       setCurrentUser(me);
       setActiveEstId(me.establishmentId);
       if (me.role === 'waiter') setActiveTab('pedidos'); // Waiter only accesses orders
@@ -131,26 +124,21 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
 
   const handleLogout = async () => {
     try {
-      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include', headers: getAuthHeaders() });
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
     } catch (err) {
       console.error('Logout failed', err);
     }
-    localStorage.removeItem('mimenu_token');
     setCurrentUser(null);
   };
 
-  // Rehydrate the session on mount from the httpOnly cookie or stored Bearer token; if 401, show login.
+  // Rehydrate the session on mount from the httpOnly cookie; if 401, show login.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const headers = getAuthHeaders();
-        const res = await fetch('/api/auth/me', { credentials: 'include', headers });
+        const res = await fetch('/api/auth/me', { credentials: 'include' });
         if (!cancelled && res.ok) {
           const me: AuthMe = await res.json();
-          if (me.token) {
-            localStorage.setItem('mimenu_token', me.token);
-          }
           setCurrentUser(me);
           setActiveEstId(me.establishmentId);
           if (me.role === 'waiter') setActiveTab('pedidos');
@@ -171,13 +159,12 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     if (!currentUser) return;
     const estId = currentUser.establishmentId;
     try {
-      const headers = getAuthHeaders();
       const [estRes, catRes, menuRes, tabRes, ordRes] = await Promise.all([
-        fetch('/api/establishments', { credentials: 'include', headers }).then(r => r.json()),
-        fetch(`/api/establishments/${estId}/categories`, { credentials: 'include', headers }).then(r => r.json()),
-        fetch(`/api/establishments/${estId}/menu-items`, { credentials: 'include', headers }).then(r => r.json()),
-        fetch(`/api/establishments/${estId}/tables`, { credentials: 'include', headers }).then(r => r.json()),
-        fetch('/api/my/orders', { credentials: 'include', headers }).then(r => r.json())
+        fetch('/api/establishments', { credentials: 'include' }).then(r => r.json()),
+        fetch(`/api/establishments/${estId}/categories`, { credentials: 'include' }).then(r => r.json()),
+        fetch(`/api/establishments/${estId}/menu-items`, { credentials: 'include' }).then(r => r.json()),
+        fetch(`/api/establishments/${estId}/tables`, { credentials: 'include' }).then(r => r.json()),
+        fetch('/api/my/orders', { credentials: 'include' }).then(r => r.json())
       ]);
 
       if (Array.isArray(estRes)) setEstablishments(estRes);
@@ -252,10 +239,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     try {
       const res = await fetch(`/api/orders/${order.id}/status`, {
         method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders()
-        },
+        headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({ status: nextStatus })
       });
@@ -279,10 +263,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       // 1. Cancel Order request
       const res = await fetch(`/api/orders/${selectedOrder.id}/status`, {
         method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders()
-        },
+        headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify({
           status: 'Cancelado',
@@ -302,10 +283,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
           };
           await fetch('/api/menu-items', {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              ...getAuthHeaders()
-            },
+            headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
             body: JSON.stringify(payload)
           });
@@ -342,10 +320,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     try {
       const res = await fetch('/api/menu-items', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders()
-        },
+        headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify(payload)
       });
@@ -364,7 +339,6 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     try {
       const res = await fetch(`/api/menu-items/${itemId}`, {
         method: 'DELETE',
-        headers: getAuthHeaders(),
         credentials: 'include'
       });
       if (res.ok) fetchDbState();
@@ -388,10 +362,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     try {
       const res = await fetch('/api/categories', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders()
-        },
+        headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify(payload)
       });
@@ -410,7 +381,6 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     try {
       const res = await fetch(`/api/categories/${catId}`, {
         method: 'DELETE',
-        headers: getAuthHeaders(),
         credentials: 'include'
       });
       if (res.ok) fetchDbState();
@@ -434,10 +404,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     try {
       const res = await fetch('/api/tables', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders()
-        },
+        headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
         body: JSON.stringify(payload)
       });
@@ -456,7 +423,6 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     try {
       const res = await fetch(`/api/tables/${tableId}`, {
         method: 'DELETE',
-        headers: getAuthHeaders(),
         credentials: 'include'
       });
       if (res.ok) fetchDbState();
