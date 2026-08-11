@@ -22,6 +22,13 @@ declare global {
 const DEFAULT_SECRET = 'dev-only-change-me';
 export const SECRET: string = process.env.AUTH_SECRET || DEFAULT_SECRET;
 if (SECRET === DEFAULT_SECRET) {
+  // In production the default secret is public (it lives in the repo), so anyone
+  // could forge admin tokens. Refuse to boot instead of silently accepting it.
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      '[auth] AUTH_SECRET must be set in production. Refusing to start with the insecure default secret.'
+    );
+  }
   console.warn(
     '[auth] AUTH_SECRET not set — using insecure default "dev-only-change-me". Set AUTH_SECRET in production.'
   );
