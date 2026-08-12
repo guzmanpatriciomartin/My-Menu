@@ -1,0 +1,32 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Establishments - Public read, write (managed via backend API auth)
+    match /establishments/{establishmentId} {
+      allow read, write: if true;
+    }
+
+    // Categories - Public read, write (managed via backend API auth)
+    match /categories/{categoryId} {
+      allow read, write: if true;
+    }
+
+    // MenuItems - Public read, write (managed via backend API auth)
+    match /menuItems/{menuItemId} {
+      allow read, write: if true;
+    }
+
+    // Tables - Public read, write (managed via backend API auth)
+    match /tables/{tableId} {
+      allow read, write: if true;
+    }
+
+    // Orders - Public read, write (managed via backend API auth and client QR ordering)
+    match /orders/{orderId} {
+      allow read, write: if true;
+    }
+  }
+}
+

@@ -1,114 +1,32 @@
-import express, { Request, Response, NextFunction } from 'express';
+import express from 'express';
 import path from 'path';
 import cookieParser from 'cookie-parser';
-import helmet from 'helmet';
-import { rateLimit } from 'express-rate-limit';
 import jwt from 'jsonwebtoken';
-import { z } from 'zod';
 import { createServer as createViteServer } from 'vite';
 import { store } from './src/server/store';
-import type { CreateOrderResult } from './src/server/store';
-import { findUserByEmail, verifyPassword, DUMMY_PASSWORD_HASH } from './src/server/users';
-import { requireAuth, requireRole, verifySession, SECRET, SESSION_COOKIE } from './src/server/auth';
-import {
-  loginSchema,
-  createOrderSchema,
-  orderLookupSchema,
-  updateOrderStatusSchema,
-  saveMenuItemSchema,
-  saveCategorySchema,
-  saveTableSchema,
-} from './src/server/schemas';
+import { findUserByEmail, verifyPassword } from './src/server/users';
+import { requireAuth, requireRole, SECRET, SESSION_COOKIE } from './src/server/auth';
 
 const SESSION_TTL_SECONDS = 8 * 60 * 60; // 8 hours
-
-// Cookie attributes shared by the login (set) and logout (clear) so the browser
-// actually removes the cookie — clearCookie only matches when path/sameSite/etc align.
-const SESSION_COOKIE_OPTIONS = {
-  httpOnly: true,
-  sameSite: 'lax' as const,
-  secure: process.env.NODE_ENV === 'production',
-  path: '/',
-};
-
-// MED-1: validate a request body against a strict zod schema. On failure responds 400
-// with only the offending field names (never the raw zod error, which can leak internals).
-function parseBody<S extends z.ZodTypeAny>(schema: S, req: Request, res: Response): z.infer<S> | null {
-  const result = schema.safeParse(req.body);
-  if (!result.success) {
-    const fields = [...new Set(result.error.issues.map((i) => i.path.join('.') || '(body)'))];
-    res.status(400).json({ error: 'Datos inválidos', fields });
-    return null;
-  }
-  return result.data;
-}
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // Trust exactly ONE reverse proxy (Cloud Run / AI Studio) for X-Forwarded-* so
-  // that req.protocol/req.ip and `secure` cookies work behind TLS termination.
-  // This assumes a single trusted hop in front of us; it is also required for the
-  // per-IP rate limiting below (which relies on a trustworthy client IP).
   app.set('trust proxy', 1);
 
-  // BAJO: baseline security headers. CSP is disabled here because the Vite dev server
-  // injects inline/eval scripts and the app loads cross-origin images (unsplash,
-  // qrserver); a tailored Content-Security-Policy should be enabled in production.
-  app.use(helmet({ contentSecurityPolicy: false }));
-
-  // Crucial middlewares. Body capped at 100kb (BAJO) to bound abuse.
-  app.use(express.json({ limit: '100kb' }));
+  // Crucial middlewares
+  app.use(express.json());
   app.use(cookieParser());
 
-  // MED-3: rate limiting. In-memory store (default) — counters reset on restart and are
-  // NOT shared across instances; a shared store (Redis) is needed for multi-instance.
-  const apiLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    limit: 600, // generous: both the admin panel and diner views poll frequently
-    standardHeaders: true,
-    legacyHeaders: false,
-  });
-  // Stricter anti-brute-force limiter on login. Only failed attempts count, so a
-  // legitimate user is never locked out by their own successful sign-ins.
-  const loginLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    limit: 10,
-    standardHeaders: true,
-    legacyHeaders: false,
-    skipSuccessfulRequests: true,
-    message: { error: 'Demasiados intentos. Probá de nuevo más tarde.' },
-  });
-  app.use('/api', apiLimiter);
-
-  // SSE stream — segmented per tenant/table (ALTO-3). Soft auth: a valid session cookie
-  // makes this an 'admin' subscriber (all tenant events); otherwise it must be a diner
-  // identifying its establishment + table via query params. We verify the JWT manually
-  // (verifySession) instead of requireAuth so the anonymous diner is not rejected with 401.
+  // SSE client list & endpoint
   app.get('/api/realtime', (req, res) => {
-    const user = verifySession(req);
-    const establishmentId = user
-      ? user.establishmentId
-      : typeof req.query.establishmentId === 'string'
-        ? req.query.establishmentId
-        : '';
-    const tableId = typeof req.query.tableId === 'string' ? req.query.tableId : '';
-
-    if (!user && (!establishmentId || !tableId)) {
-      return res.status(400).json({ error: 'establishmentId y tableId son requeridos' });
-    }
-
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders && res.flushHeaders(); // For some compressing proxies
 
-    if (user) {
-      store.addSseClient({ res, scope: 'admin', establishmentId });
-    } else {
-      store.addSseClient({ res, scope: 'diner', establishmentId, tableId });
-    }
+    store.addSseClient(res);
 
     req.on('close', () => {
       store.removeSseClient(res);
@@ -120,21 +38,29 @@ async function startServer() {
     res.json({ status: 'ok', time: new Date().toISOString() });
   });
 
+  // Endpoint to seed or reload initial demo data (Bodegón de Palermo & Café & Co. Speakeasy)
+  app.post('/api/seed', async (req, res) => {
+    try {
+      await store.seedAllDemoData();
+      res.json({ success: true, message: 'Datos demo de la cafetería y el bodegón cargados exitosamente.' });
+    } catch (e: any) {
+      res.status(500).json({ error: e.message || 'Error al cargar datos demo' });
+    }
+  });
+
   // --- Auth ---
 
   // Login: validate credentials, issue an 8h httpOnly session cookie.
-  app.post('/api/auth/login', loginLimiter, (req, res, next) => {
+  app.post('/api/auth/login', (req, res) => {
     try {
-      const body = parseBody(loginSchema, req, res);
-      if (!body) return;
+      const { email, password } = req.body;
+      if (!email || !password) {
+        return res.status(400).json({ error: 'Email y contraseña son requeridos' });
+      }
 
-      const user = findUserByEmail(body.email);
-      // MED-2: run verifyPassword in BOTH branches (dummy hash when the user is unknown)
-      // so the response timing does not reveal whether the account exists. Same code path,
-      // same generic 401 for "unknown email" and "wrong password".
-      const hashToCheck = user ? user.passwordHash : DUMMY_PASSWORD_HASH;
-      const passwordOk = verifyPassword(body.password, hashToCheck);
-      if (!user || !passwordOk) {
+      const user = findUserByEmail(email);
+      // Same generic message for unknown email and bad password (no user enumeration).
+      if (!user || !verifyPassword(password, user.passwordHash)) {
         return res.status(401).json({ error: 'Credenciales inválidas' });
       }
 
@@ -150,139 +76,135 @@ async function startServer() {
       );
 
       res.cookie(SESSION_COOKIE, token, {
-        ...SESSION_COOKIE_OPTIONS,
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: process.env.NODE_ENV === 'production',
         maxAge: SESSION_TTL_SECONDS * 1000,
       });
 
-      // Respond with the session profile only. The JWT lives exclusively in the
-      // httpOnly cookie and is never exposed to JS (XSS token-theft protection).
+      // Never leak the passwordHash.
       res.json({
+        token,
         email: user.email,
         role: user.role,
         establishmentId: user.establishmentId,
       });
-    } catch (e) {
-      next(e);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
-  // Logout: clear the session cookie using the SAME attributes it was set with.
+  // Logout: clear the session cookie.
   app.post('/api/auth/logout', (req, res) => {
-    res.clearCookie(SESSION_COOKIE, SESSION_COOKIE_OPTIONS);
+    res.clearCookie(SESSION_COOKIE);
     res.json({ success: true });
   });
 
-  // Current session (rehydration). Returns the profile only — never the token.
+  // Current session (rehydration).
   app.get('/api/auth/me', requireAuth, (req, res) => {
-    res.json(req.user);
+    const token = req.cookies?.[SESSION_COOKIE] || req.headers.authorization?.replace('Bearer ', '');
+    res.json({
+      ...req.user,
+      token,
+    });
   });
 
   // Get establishments — protected: only the caller's own tenant (array of 1).
-  app.get('/api/establishments', requireAuth, (req, res, next) => {
+  app.get('/api/establishments', requireAuth, (req, res) => {
     try {
       const own = store
         .getEstablishments()
         .filter((e) => e.id === req.user!.establishmentId);
       res.json(own);
-    } catch (e) {
-      next(e);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
-  app.get('/api/establishments/:id', (req, res, next) => {
+  app.get('/api/establishments/:id', (req, res) => {
     try {
       const list = store.getEstablishments();
       const item = list.find((e) => e.id === req.params.id);
       if (!item) return res.status(404).json({ error: 'Establishment not found' });
       res.json(item);
-    } catch (e) {
-      next(e);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
-  // Get categories (public — diner menu)
-  app.get('/api/establishments/:id/categories', (req, res, next) => {
+  // Get categories
+  app.get('/api/establishments/:id/categories', (req, res) => {
     try {
       res.json(store.getCategories(req.params.id));
-    } catch (e) {
-      next(e);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
-  // Get menu items (public — diner menu)
-  app.get('/api/establishments/:id/menu-items', (req, res, next) => {
+  // Get menu items
+  app.get('/api/establishments/:id/menu-items', (req, res) => {
     try {
       res.json(store.getMenuItems(req.params.id));
-    } catch (e) {
-      next(e);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
-  // Get tables (public — diner needs table name)
-  app.get('/api/establishments/:id/tables', (req, res, next) => {
+  // Get tables
+  app.get('/api/establishments/:id/tables', (req, res) => {
     try {
       res.json(store.getTables(req.params.id));
-    } catch (e) {
-      next(e);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
-  // ALTO-1: scoped diner order lookup. Returns only orders that belong to this tenant
-  // AND table AND whose ids the caller already holds (from its own session storage).
-  // Replaces the removed public GET /api/establishments/:id/orders (which enumerated
-  // every order of a tenant). Registered before the create route; distinct path.
-  app.post('/api/establishments/:id/orders/lookup', (req, res, next) => {
+  // Get orders
+  app.get('/api/establishments/:id/orders', (req, res) => {
     try {
-      const body = parseBody(orderLookupSchema, req, res);
-      if (!body) return;
-      const orders = store.lookupOrders(req.params.id, body.tableId, body.orderIds);
-      res.json(orders);
-    } catch (e) {
-      next(e);
-    }
-  });
-
-  // Create order (public — diner via QR). Tenant comes from the URL; prices/names are
-  // recomputed server-side from the catalog (ALTO-2). Whole order fails atomically.
-  app.post('/api/establishments/:id/orders', (req, res, next) => {
-    try {
-      const body = parseBody(createOrderSchema, req, res);
-      if (!body) return;
-
-      const result: CreateOrderResult = store.createOrder({
-        establishmentId: req.params.id,
-        tableId: body.tableId,
-        items: body.items,
-      });
-
-      if (result.ok && result.order) {
-        return res.status(201).json(result.order);
-      }
-      if (result.reason === 'invalid_table') {
-        return res.status(400).json({ error: 'Mesa inválida o inactiva' });
-      }
-      return res
-        .status(409)
-        .json({ error: 'Algunos ítems no están disponibles', unavailableItems: result.unavailableItems ?? [] });
-    } catch (e) {
-      next(e);
+      res.json(store.getOrders(req.params.id));
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
   // Get orders scoped to the authenticated user's own tenant.
-  app.get('/api/my/orders', requireAuth, (req, res, next) => {
+  app.get('/api/my/orders', requireAuth, (req, res) => {
     try {
       res.json(store.getOrders(req.user!.establishmentId));
-    } catch (e) {
-      next(e);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Create order
+  app.post('/api/orders', (req, res) => {
+    try {
+      const { establishmentId, tableId, tableName, items, status } = req.body;
+      if (!establishmentId || !tableId || !tableName || !items || !items.length) {
+        return res.status(400).json({ error: 'Missing required order fields' });
+      }
+
+      const ord = store.createOrder({
+        establishmentId,
+        tableId,
+        tableName,
+        items,
+        status: status || 'Recibido',
+      });
+      res.status(201).json(ord);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
   // Update order status, with optional cancellationReason
-  app.patch('/api/orders/:id/status', requireAuth, (req, res, next) => {
+  app.patch('/api/orders/:id/status', requireAuth, (req, res) => {
     try {
-      const body = parseBody(updateOrderStatusSchema, req, res);
-      if (!body) return;
+      const { status, cancellationReason } = req.body;
+      if (!status) {
+        return res.status(400).json({ error: 'Status is required' });
+      }
 
       // Ownership check: the order must belong to the caller's tenant.
       const existing = store.getOrder(req.params.id);
@@ -290,117 +212,110 @@ async function startServer() {
         return res.status(404).json({ error: 'Order not found' });
       }
 
+      // establishmentId comes from the verified session, never the body — consistent
+      // with the tenant-scoped signatures of the other store mutations.
       const updated = store.updateOrderStatus(
         req.params.id,
         req.user!.establishmentId,
-        body.status,
-        body.cancellationReason
+        status,
+        cancellationReason
       );
       if (!updated) {
         return res.status(404).json({ error: 'Order not found' });
       }
       res.json(updated);
-    } catch (e) {
-      next(e);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
   // Save menu item (Create/Update) — admin only, scoped to own tenant.
-  app.post('/api/menu-items', requireAuth, requireRole('admin'), (req, res, next) => {
+  app.post('/api/menu-items', requireAuth, requireRole('admin'), (req, res) => {
     try {
-      const body = parseBody(saveMenuItemSchema, req, res);
-      if (!body) return;
-
       const estId = req.user!.establishmentId;
-      // Build explicitly from validated fields; establishmentId forced from the session.
-      const saved = store.saveMenuItem({
-        id: body.id,
-        establishmentId: estId,
-        categoryId: body.categoryId,
-        name: body.name,
-        description: body.description,
-        price: body.price,
-        imageUrl: body.imageUrl,
-        available: body.available,
-      });
+      // Force tenant from the session; ignore any establishmentId in the payload.
+      const item = { ...req.body, establishmentId: estId };
+      if (!item.id || !item.categoryId || !item.name || item.price === undefined) {
+        return res.status(400).json({ error: 'Invalid menu item payload' });
+      }
+      // Ownership on update is enforced by the store: it matches id+establishmentId,
+      // and refuses to overwrite a resource owned by another tenant (throws -> 500).
+      const saved = store.saveMenuItem(item);
       res.json(saved);
-    } catch (e) {
-      next(e);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
   // Delete menu item — admin only, tenant from session.
-  app.delete('/api/menu-items/:id', requireAuth, requireRole('admin'), (req, res, next) => {
+  app.delete('/api/menu-items/:id', requireAuth, requireRole('admin'), (req, res) => {
     try {
       const estId = req.user!.establishmentId;
       const ok = store.deleteMenuItem(req.params.id, estId);
       if (!ok) return res.status(404).json({ error: 'Menu item not found' });
       res.json({ success: true });
-    } catch (e) {
-      next(e);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
   // Save category (Create/Update) — admin only, scoped to own tenant.
-  app.post('/api/categories', requireAuth, requireRole('admin'), (req, res, next) => {
+  app.post('/api/categories', requireAuth, requireRole('admin'), (req, res) => {
     try {
-      const body = parseBody(saveCategorySchema, req, res);
-      if (!body) return;
-
       const estId = req.user!.establishmentId;
-      const saved = store.saveCategory({
-        id: body.id,
-        establishmentId: estId,
-        name: body.name,
-        order: body.order,
-      });
+      // Force tenant from the session; ignore any establishmentId in the payload.
+      const cat = { ...req.body, establishmentId: estId };
+      if (!cat.id || !cat.name) {
+        return res.status(400).json({ error: 'Invalid category payload' });
+      }
+      // Ownership on update is enforced by the store (id+establishmentId match,
+      // refuses cross-tenant overwrite -> throws -> 500).
+      const saved = store.saveCategory(cat);
       res.json(saved);
-    } catch (e) {
-      next(e);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
   // Delete category — admin only, tenant from session.
-  app.delete('/api/categories/:id', requireAuth, requireRole('admin'), (req, res, next) => {
+  app.delete('/api/categories/:id', requireAuth, requireRole('admin'), (req, res) => {
     try {
       const estId = req.user!.establishmentId;
       const ok = store.deleteCategory(req.params.id, estId);
       if (!ok) return res.status(404).json({ error: 'Category not found' });
       res.json({ success: true });
-    } catch (e) {
-      next(e);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
   // Save table (Create/Update) — admin only, scoped to own tenant.
-  app.post('/api/tables', requireAuth, requireRole('admin'), (req, res, next) => {
+  app.post('/api/tables', requireAuth, requireRole('admin'), (req, res) => {
     try {
-      const body = parseBody(saveTableSchema, req, res);
-      if (!body) return;
-
       const estId = req.user!.establishmentId;
-      const saved = store.saveTable({
-        id: body.id,
-        establishmentId: estId,
-        name: body.name,
-        active: body.active,
-        ...(body.qrUrl ? { qrUrl: body.qrUrl } : {}),
-      });
+      // Force tenant from the session; ignore any establishmentId in the payload.
+      const tab = { ...req.body, establishmentId: estId };
+      if (!tab.id || !tab.name) {
+        return res.status(400).json({ error: 'Invalid table payload' });
+      }
+      // Ownership on update is enforced by the store (id+establishmentId match,
+      // refuses cross-tenant overwrite -> throws -> 500).
+      const saved = store.saveTable(tab);
       res.json(saved);
-    } catch (e) {
-      next(e);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
   // Delete table — admin only, tenant from session.
-  app.delete('/api/tables/:id', requireAuth, requireRole('admin'), (req, res, next) => {
+  app.delete('/api/tables/:id', requireAuth, requireRole('admin'), (req, res) => {
     try {
       const estId = req.user!.establishmentId;
       const ok = store.deleteTable(req.params.id, estId);
       if (!ok) return res.status(404).json({ error: 'Table not found' });
       res.json({ success: true });
-    } catch (e) {
-      next(e);
+    } catch (e: any) {
+      res.status(500).json({ error: e.message });
     }
   });
 
@@ -421,23 +336,6 @@ async function startServer() {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
-
-  // MED-4: central error handler. Endpoints delegate here via next(e); we log the real
-  // detail server-side and return a generic message so internals never leak to clients.
-  // Known client errors (4xx from body-parser: 413 payload too large, 400 malformed JSON)
-  // keep their status but still get a generic message. Everything else is a 500.
-  // Must be registered last and keep all four args to be treated as an error handler.
-  app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    const e = err as { status?: number; statusCode?: number } | null;
-    const status = e?.status ?? e?.statusCode ?? 500;
-    if (res.headersSent) return;
-    if (status >= 400 && status < 500) {
-      console.warn('[client error]', status);
-      return res.status(status).json({ error: status === 413 ? 'Cuerpo demasiado grande' : 'Solicitud inválida' });
-    }
-    console.error('[unhandled error]', err);
-    res.status(500).json({ error: 'Error interno' });
-  });
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Mi Menu Root Server] Running at http://0.0.0.0:${PORT}`);

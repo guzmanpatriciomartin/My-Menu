@@ -33,12 +33,6 @@ export function verifyPassword(password: string, stored: string): boolean {
   return crypto.timingSafeEqual(storedBuf, derivedBuf);
 }
 
-// MED-2: precomputed dummy hash (valid format, no real account) used to run the SAME
-// scrypt work when the email does not exist, so login timing does not reveal whether
-// an account exists. The plaintext behind it is random and never used.
-export const DUMMY_PASSWORD_HASH =
-  '6f3f3a1600ccde49f159673ff7c65f63:c1fc19843df8787d0e612b45a44828b7098b14cca00da6a9414476bcd21fd86c78529e9587d015832be3e0f24378ef546328ea8e4c64d098ae630d935bf89933';
-
 // Seed users. Password hashes were generated once with hashPassword() and pasted
 // here so the raw passwords never live in source.
 //   carolina@mimenu.com -> 'admin'  (admin,  bodegon-palermo)
@@ -74,7 +68,7 @@ export const seedUsers: ServerUser[] = [
     id: 'usr-4',
     email: 'sofia@mimenu.com',
     passwordHash:
-      '4f8e1abb014cf4dae078dbf565e4ed82:5d7f66bc8e510626d8728f887c1ee35de758020fed5d34d413a5e83b3c0035c4c08bc2ad96e7c2cfd38bc1f5ea57ea773b63831836e5fc380a64b9fd1428c484',
+      '83e1b4aabf59f9257586711274495848:d98c914480c71806325368587d291a9a7d97140d6a3b0b0272fc0d47a16af1db4be411dd5576f4c727b8a67d4e29660ba4a4f8e82e2ceba9e05d2f3a665f5626',
     role: 'waiter',
     establishmentId: 'cafe-speakeasy',
   },

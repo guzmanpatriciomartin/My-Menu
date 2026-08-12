@@ -1,0 +1,76 @@
+{
+  "entities": {
+    "establishments": {
+      "title": "Establishments",
+      "description": "Venues and restaurants in the multi-tenant SaaS",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "accentColor": { "type": "string" },
+        "logoUrl": { "type": "string" }
+      },
+      "required": ["id", "name"]
+    },
+    "categories": {
+      "title": "Categories",
+      "description": "Menu categories scoped by establishmentId",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "establishmentId": { "type": "string" },
+        "name": { "type": "string" },
+        "order": { "type": "number" }
+      },
+      "required": ["id", "establishmentId", "name", "order"]
+    },
+    "menuItems": {
+      "title": "MenuItems",
+      "description": "Menu items scoped by establishmentId",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "establishmentId": { "type": "string" },
+        "categoryId": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "price": { "type": "number" },
+        "imageUrl": { "type": "string" },
+        "available": { "type": "boolean" }
+      },
+      "required": ["id", "establishmentId", "categoryId", "name", "price"]
+    },
+    "tables": {
+      "title": "Tables",
+      "description": "Dining tables scoped by establishmentId",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "establishmentId": { "type": "string" },
+        "name": { "type": "string" },
+        "active": { "type": "boolean" },
+        "qrUrl": { "type": "string" }
+      },
+      "required": ["id", "establishmentId", "name", "active"]
+    },
+    "orders": {
+      "title": "Orders",
+      "description": "Customer orders scoped by establishmentId",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "establishmentId": { "type": "string" },
+        "tableId": { "type": "string" },
+        "tableName": { "type": "string" },
+        "items": { "type": "array" },
+        "status": { "type": "string" },
+        "cancellationReason": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "paymentStatus": { "type": "string" }
+      },
+      "required": ["id", "establishmentId", "tableId", "tableName", "items", "status", "createdAt"]
+    }
+  }
+}

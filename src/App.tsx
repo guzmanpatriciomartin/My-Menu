@@ -2,8 +2,9 @@ import React, { useState, useEffect } from 'react';
 import DemoHome from './components/DemoHome';
 import ClientView from './components/ClientView';
 import AdminView from './components/AdminView';
+import { ThemeProvider } from './theme/ThemeContext';
 
-export default function App() {
+function MainApp() {
   const [view, setView] = useState<'launcher' | 'client' | 'admin'>('launcher');
   const [clientParams, setClientParams] = useState<{ est: string; tab: string }>({ est: '', tab: '' });
 
@@ -18,7 +19,6 @@ export default function App() {
         setClientParams({ est: estParam, tab: tabParam });
         setView('client');
       } else {
-        // Double check if we want to reset back to main launcher on empty search
         setView('launcher');
       }
     } catch (e) {
@@ -28,7 +28,6 @@ export default function App() {
 
   // Back actions
   const handleBackToLauncher = () => {
-    // Clear URL query parameters for clean demo experience
     try {
       window.history.pushState({}, '', window.location.pathname);
     } catch (e) {
@@ -38,7 +37,6 @@ export default function App() {
   };
 
   const handleLaunchClient = (estId: string, tableId: string) => {
-    // Update URL to make copyable shareable QR links! Excellent developer touch.
     try {
       const newUrl = `${window.location.pathname}?establishment=${estId}&table=${tableId}`;
       window.history.pushState({}, '', newUrl);
@@ -54,7 +52,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[#FCFAF7]">
+    <div className="min-h-screen relative font-sans transition-colors duration-300">
       {view === 'launcher' && (
         <DemoHome 
           onLaunchClient={handleLaunchClient} 
@@ -78,3 +76,12 @@ export default function App() {
     </div>
   );
 }
+
+export default function App() {
+  return (
+    <ThemeProvider>
+      <MainApp />
+    </ThemeProvider>
+  );
+}
+
