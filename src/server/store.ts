@@ -320,11 +320,25 @@ class Store {
   private async seedIfEmpty() {
     for (const { name, items } of SEED_COLLECTIONS) {
       const snap = await getDocs(query(collection(db, name), limit(1)));
+
+      // An offline read is served from the local cache, which starts out empty — so
+      // "empty" here would mean "we could not reach Firestore", not "there is no data".
+      // Seeding on that would queue writes on fixed document ids that flush once the
+      // connection returns, overwriting real data with demo data. When we cannot verify,
+      // we do nothing: a missing seed is recoverable, an overwrite is not.
+      if (snap.metadata.fromCache) {
+        console.warn(
+          `[Firestore] Skipping seed check for "${name}": read came from cache (offline). ` +
+            'Cannot tell an empty collection from an unreachable backend.'
+        );
+        continue;
+      }
+
       if (snap.empty) {
         console.log(`[Firestore] Seeding empty collection "${name}"...`);
         const batch = writeBatch(db);
         for (const item of items) {
-          batch.set(doc(db, name, item.id), item as Record<string, unknown>);
+          batch.set(doc(db, name, item.id), forFirestore(item));
         }
         await batch.commit();
       }
@@ -339,7 +353,7 @@ class Store {
     for (const { name, items } of SEED_COLLECTIONS) {
       const batch = writeBatch(db);
       for (const item of items) {
-        batch.set(doc(db, name, item.id), item as Record<string, unknown>);
+        batch.set(doc(db, name, item.id), forFirestore(item));
       }
       await batch.commit();
     }
