@@ -24,6 +24,9 @@ import {
   saveTableSchema,
   createTableCallSchema,
   updateTableCallSchema,
+  cashCloseSchema,
+  metricsQuerySchema,
+  cashClosesQuerySchema,
 } from './src/server/schemas';
 
 const SESSION_TTL_SECONDS = 8 * 60 * 60; // 8 hours
@@ -39,6 +42,18 @@ const SESSION_COOKIE_OPTIONS = {
 
 // F-7: validate a request body against a strict zod schema. On failure responds 400
 // with only the offending field names (never the raw zod error, which can leak internals).
+// Same contract as parseBody, for query strings. Query values arrive as strings, so the
+// schemas that use it coerce where a number is expected.
+function parseQuery<S extends z.ZodTypeAny>(schema: S, req: Request, res: Response): z.infer<S> | null {
+  const result = schema.safeParse(req.query);
+  if (!result.success) {
+    const fields = [...new Set(result.error.issues.map((i) => i.path.join('.') || '(query)'))];
+    res.status(400).json({ error: 'Parámetros inválidos', fields });
+    return null;
+  }
+  return result.data;
+}
+
 function parseBody<S extends z.ZodTypeAny>(schema: S, req: Request, res: Response): z.infer<S> | null {
   const result = schema.safeParse(req.body);
   if (!result.success) {
@@ -369,6 +384,68 @@ async function startServer() {
     }
   });
 
+  // --- Metrics & cash close (ADR-005) ---
+
+  // Full analytics are admin-only: they expose product performance and business
+  // patterns. A waiter still sees their own shift total through the cash-close preview.
+  app.get('/api/my/metrics', requireAuth, requireRole('admin'), (req, res, next) => {
+    try {
+      const q = parseQuery(metricsQuerySchema, req, res);
+      if (!q) return;
+      res.json(store.getMetrics(req.user!.establishmentId, q.day));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // Preview and close are available to waiters too: closing the register is shift work,
+  // not business intelligence.
+  app.get('/api/my/cash-close/preview', requireAuth, (req, res, next) => {
+    try {
+      res.json(store.previewCashClose(req.user!.establishmentId));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post('/api/my/cash-close', requireAuth, async (req, res, next) => {
+    try {
+      const body = parseBody(cashCloseSchema, req, res);
+      if (!body) return;
+
+      // Everything that matters is derived server-side: the caller only supplies a note,
+      // so the recorded revenue cannot be forged from the client.
+      const result = await store.executeCashClose(
+        req.user!.establishmentId,
+        {
+          email: req.user!.email,
+          name: req.user!.email.split('@')[0],
+          role: req.user!.role,
+        },
+        body.note
+      );
+
+      if (!result.ok) {
+        return res
+          .status(409)
+          .json({ error: 'No hay pedidos entregados pendientes de cierre' });
+      }
+      res.status(201).json(result.close);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.get('/api/my/cash-closes', requireAuth, (req, res, next) => {
+    try {
+      const q = parseQuery(cashClosesQuerySchema, req, res);
+      if (!q) return;
+      res.json(store.getCashCloses(req.user!.establishmentId, q.limit));
+    } catch (e) {
+      next(e);
+    }
+  });
+
   // Update order status, with optional cancellationReason
   app.patch('/api/orders/:id/status', requireAuth, async (req, res, next) => {
     try {
@@ -379,6 +456,14 @@ async function startServer() {
       const existing = store.getOrder(req.params.id);
       if (!existing || existing.establishmentId !== req.user!.establishmentId) {
         return res.status(404).json({ error: 'Order not found' });
+      }
+
+      // An order already counted in a cash close is frozen: changing it now would
+      // unbalance a receipt that was already issued. (ADR-005)
+      if (existing.cashCloseId) {
+        return res.status(409).json({
+          error: 'El pedido pertenece a un cierre de caja y no puede modificarse',
+        });
       }
 
       const updated = await store.updateOrderStatus(

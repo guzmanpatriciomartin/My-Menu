@@ -11,7 +11,33 @@ import {
   writeBatch
 } from 'firebase/firestore';
 import { initialEstablishments, initialCategories, initialMenuItems, initialTables } from '../db/seedData';
-import { Establishment, Category, MenuItem, Table, Order, OrderItem, OrderStatus, TableCall } from '../types';
+import {
+  Establishment,
+  Category,
+  MenuItem,
+  Table,
+  Order,
+  OrderItem,
+  OrderStatus,
+  TableCall,
+  CashClose,
+  CashCloseTotals,
+  MetricsSummary,
+  ProductLine,
+  TableLine,
+  UserRole,
+} from '../types';
+import {
+  computeByHour,
+  computeByTable,
+  computeComparison,
+  computeTopProducts,
+  computeTotals,
+  deliveredInRange,
+  isRevenueOrder,
+  saleTimestamp,
+} from './metrics';
+import { dayBounds, elapsedInDay, isToday, shiftDay, venueDay } from './time';
 
 interface DbSchema {
   establishments: Establishment[];
@@ -55,6 +81,29 @@ export interface CreateOrderInput {
 // because this project compiles with strictNullChecks OFF, where boolean-discriminant
 // narrowing is unreliable. The endpoint maps each outcome to a status code:
 // ok -> 201, reason 'invalid_table' -> 400, reason 'unavailable_items' -> 409.
+// Same optional-field result shape used across this store (the project compiles with
+// strictNullChecks off, so discriminated unions do not narrow on a boolean).
+export interface CashCloseResult {
+  ok: boolean;
+  close?: CashClose;
+  reason?: 'empty';
+}
+
+export interface CashClosePreview {
+  periodStart: string;
+  periodEnd: string;
+  totals: CashCloseTotals;
+  orderCount: number;
+  topProducts: ProductLine[];
+  byTable: TableLine[];
+}
+
+export interface CashCloseActor {
+  email: string;
+  name: string;
+  role: UserRole;
+}
+
 export interface CreateOrderResult {
   ok: boolean;
   order?: Order;
@@ -62,7 +111,9 @@ export interface CreateOrderResult {
   unavailableItems?: string[];
 }
 
-type NotifyType = 'ORDER_CREATED' | 'ORDER_STATUS_CHANGED' | 'MENU_CHANGED' | 'TABLES_CHANGED' | 'TABLE_CALL_CREATED' | 'TABLE_SESSION_CLOSED';
+// CASH_CLOSED is admin-only by construction: shouldDeliver() whitelists what a diner
+// may receive, so anything not listed there (this included) never reaches that channel.
+type NotifyType = 'ORDER_CREATED' | 'ORDER_STATUS_CHANGED' | 'MENU_CHANGED' | 'TABLES_CHANGED' | 'TABLE_CALL_CREATED' | 'TABLE_SESSION_CLOSED' | 'CASH_CLOSED';
 
 interface NotifyPayload {
   establishmentId: string;
@@ -136,7 +187,14 @@ class Store {
 
   private sseClients: SseClient[] = [];
   private tableCalls: TableCall[] = [];
+  private cashCloses: CashClose[] = [];
   private closedSessions: Map<string, string> = new Map();
+
+  // Serializes cash closes per tenant: two waiters hitting "Cerrar caja" at the same
+  // instant must not both stamp the same orders. The second one waits, then finds an
+  // empty pending set and gets a 409. Single-process only — with several instances this
+  // needs a Firestore runTransaction instead.
+  private cashClosesInFlight: Map<string, Promise<CashCloseResult>> = new Map();
 
   constructor() {
     this.initFirebaseSync();
@@ -229,6 +287,16 @@ class Store {
         this.tableCalls = Array.from(map.values());
       },
       (err) => console.error('[Firestore tableCalls listener]', err)
+    );
+    onSnapshot(
+      collection(db, 'cashCloses'),
+      (snap) => {
+        const docs = snap.docs.map((d) => d.data() as CashClose);
+        const map = new Map<string, CashClose>();
+        docs.forEach((d) => map.set(d.id, d));
+        this.cashCloses = Array.from(map.values());
+      },
+      (err) => console.error('[Firestore cashCloses listener]', err)
     );
   }
 
@@ -385,11 +453,23 @@ class Store {
     );
     if (orderIndex === -1) return null;
 
+    const current = this.data.orders[orderIndex];
+
+    // Defense in depth: an order already counted in a cash close is frozen, otherwise
+    // cancelling it afterwards would silently unbalance an issued receipt. The endpoint
+    // checks this first and answers 409; this guard covers any other caller. (ADR-005)
+    if (current.cashCloseId) return null;
+
+    const now = new Date().toISOString();
     const updated: Order = {
-      ...this.data.orders[orderIndex],
+      ...current,
       status,
-      cancellationReason: cancellationReason || this.data.orders[orderIndex].cancellationReason,
-      updatedAt: new Date().toISOString(),
+      cancellationReason: cancellationReason || current.cancellationReason,
+      updatedAt: now,
+      // Stamped exactly once, on the first transition to delivered. Re-delivering must
+      // not move the sale into a later period.
+      deliveredAt:
+        status === 'Entregado' && !current.deliveredAt ? now : current.deliveredAt,
     };
 
     try {
@@ -642,6 +722,174 @@ class Store {
     const sessionKey = `${establishmentId}_${tableId}`;
     const closedAt = this.closedSessions.get(sessionKey);
     return { closedAt };
+  }
+
+  // --- Cash close & metrics (ADR-005) ---
+
+  // Orders that will go into the next close: delivered, belonging to this tenant, and
+  // not yet stamped. Membership is by stamp rather than by time window, which is what
+  // guarantees an order is never counted twice and never dropped — even if it was
+  // delivered late, or the server restarted between closes.
+  private pendingCashCloseOrders(establishmentId: string): Order[] {
+    return this.data.orders.filter(
+      (o) => o.establishmentId === establishmentId && isRevenueOrder(o) && !o.cashCloseId
+    );
+  }
+
+  // Start of the open period. Descriptive only — it never decides which orders count.
+  private openPeriodStart(establishmentId: string, pending: Order[]): string {
+    const lastClose = this.getCashCloses(establishmentId, 1)[0];
+    if (lastClose) return lastClose.periodEnd;
+
+    // First close ever: start at the earliest sale we are about to count...
+    if (pending.length > 0) {
+      return pending
+        .map(saleTimestamp)
+        .reduce((earliest, at) => (at < earliest ? at : earliest));
+    }
+    // ...or, with nothing pending, at the start of the current business day.
+    return dayBounds(venueDay()).from;
+  }
+
+  public getCashCloses(establishmentId: string, max = 30): CashClose[] {
+    return this.cashCloses
+      .filter((c) => c.establishmentId === establishmentId)
+      .sort((a, b) => (a.periodEnd < b.periodEnd ? 1 : -1))
+      .slice(0, max);
+  }
+
+  // What the waiter sees before pressing the button. Same arithmetic as the close, but
+  // writes nothing.
+  public previewCashClose(establishmentId: string): CashClosePreview {
+    const pending = this.pendingCashCloseOrders(establishmentId);
+    return {
+      periodStart: this.openPeriodStart(establishmentId, pending),
+      periodEnd: new Date().toISOString(),
+      totals: computeTotals(pending),
+      orderCount: pending.length,
+      topProducts: computeTopProducts(pending),
+      byTable: computeByTable(pending),
+    };
+  }
+
+  public async executeCashClose(
+    establishmentId: string,
+    actor: CashCloseActor,
+    note?: string
+  ): Promise<CashCloseResult> {
+    // Chain onto any close already running for this tenant so the two cannot select the
+    // same orders; the loser sees an empty set and gets 'empty'.
+    const previous = this.cashClosesInFlight.get(establishmentId);
+    const run = (previous ?? Promise.resolve<CashCloseResult>({ ok: false })).then(() =>
+      this.runCashClose(establishmentId, actor, note)
+    );
+
+    this.cashClosesInFlight.set(establishmentId, run);
+    try {
+      return await run;
+    } finally {
+      if (this.cashClosesInFlight.get(establishmentId) === run) {
+        this.cashClosesInFlight.delete(establishmentId);
+      }
+    }
+  }
+
+  private async runCashClose(
+    establishmentId: string,
+    actor: CashCloseActor,
+    note?: string
+  ): Promise<CashCloseResult> {
+    const pending = this.pendingCashCloseOrders(establishmentId);
+    // Refusing to record an empty close keeps the history meaningful and makes a
+    // double-submit harmless.
+    if (pending.length === 0) return { ok: false, reason: 'empty' };
+
+    const now = new Date().toISOString();
+    const close: CashClose = {
+      id: 'close-' + Math.random().toString(36).substring(2, 9),
+      establishmentId,
+      closedByEmail: actor.email,
+      closedByName: actor.name,
+      closedByRole: actor.role,
+      periodStart: this.openPeriodStart(establishmentId, pending),
+      periodEnd: now,
+      totals: computeTotals(pending),
+      orderIds: pending.map((o) => o.id),
+      topProducts: computeTopProducts(pending),
+      byTable: computeByTable(pending),
+      note,
+      createdAt: now,
+    };
+
+    // One atomic batch: either the close exists AND every order is stamped, or nothing
+    // happened. A partial write here would double-count orders on the next close.
+    // Firestore caps a batch at 500 operations, so chunk when a period is huge.
+    const BATCH_LIMIT = 490;
+    const chunks: Order[][] = [];
+    for (let i = 0; i < pending.length; i += BATCH_LIMIT) {
+      chunks.push(pending.slice(i, i + BATCH_LIMIT));
+    }
+
+    for (let i = 0; i < chunks.length; i++) {
+      const batch = writeBatch(db);
+      // The close document goes in the first chunk so it lands together with the bulk
+      // of the stamps.
+      if (i === 0) batch.set(doc(db, 'cashCloses', close.id), { ...close });
+      for (const order of chunks[i]) {
+        batch.set(doc(db, 'orders', order.id), { ...order, cashCloseId: close.id });
+      }
+      await batch.commit();
+    }
+
+    // Memory after the write succeeded, mirroring the write-then-memory order used by
+    // the rest of the store.
+    this.cashCloses.push(close);
+    const stamped = new Set(close.orderIds);
+    this.data.orders = this.data.orders.map((o) =>
+      stamped.has(o.id) ? { ...o, cashCloseId: close.id } : o
+    );
+
+    this.notifyClients('CASH_CLOSED', { establishmentId });
+    return { ok: true, close };
+  }
+
+  // Metrics are recomputed on demand from the in-memory projection: the data is already
+  // here, the getters are sync, and a venue does tens or hundreds of orders a day. A
+  // cached/persisted rollup would only add invalidation bugs at this scale.
+  public getMetrics(establishmentId: string, day?: string): MetricsSummary {
+    const targetDay = day ?? venueDay();
+    const { from, to } = dayBounds(targetDay);
+
+    const tenantOrders = this.data.orders.filter((o) => o.establishmentId === establishmentId);
+    const dayOrders = deliveredInRange(tenantOrders, from, to);
+    const totals = computeTotals(dayOrders);
+
+    // For the day in progress, compare like-for-like: yesterday up to this same point in
+    // the day. For a past day, compare full days.
+    const elapsedMs = isToday(targetDay) ? elapsedInDay(targetDay) : 86_400_000;
+
+    const comparison = computeComparison(
+      totals.totalRevenue,
+      dayBounds(shiftDay(targetDay, -1)),
+      // Previous 7 days, excluding the target day itself.
+      Array.from({ length: 7 }, (_, i) => dayBounds(shiftDay(targetDay, -(i + 1)))),
+      // NOTE: this walks the tenant's full order history on every request. Fine at demo
+      // volume; if the history grows, precompute daily rollups or derive them from the
+      // recorded cash closes instead.
+      tenantOrders,
+      elapsedMs
+    );
+
+    return {
+      day: targetDay,
+      from,
+      to,
+      totals,
+      topProducts: computeTopProducts(dayOrders),
+      byHour: computeByHour(dayOrders),
+      byTable: computeByTable(dayOrders),
+      comparison,
+    };
   }
 
   // SSE Subscription handlers
