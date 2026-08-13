@@ -144,7 +144,8 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
   const [sessionOrderIds, setSessionOrderIds] = useState<string[]>(() => {
     try {
       const saved = localStorage.getItem(`mimenu_orders_${establishmentId}_${tableId}`);
-      return saved ? JSON.parse(saved) : [];
+      const parsed = saved ? JSON.parse(saved) : [];
+      return Array.isArray(parsed) ? Array.from(new Set<string>(parsed)) : [];
     } catch {
       return [];
     }
@@ -185,17 +186,21 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
         return;
       }
       try {
+        const uniqueIds = Array.from(new Set(sessionOrderIds));
         // F-4: scoped lookup — we only ask for OUR own order ids on OUR table.
         // The server never enumerates other diners' orders.
         const res = await fetch(`/api/establishments/${establishmentId}/orders/lookup`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ tableId, orderIds: sessionOrderIds }),
+          body: JSON.stringify({ tableId, orderIds: uniqueIds }),
         });
         const matchingOrders: Order[] = await res.json();
-        // Sort newest first
-        matchingOrders.sort((a,b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-        setActiveOrders(matchingOrders);
+        if (Array.isArray(matchingOrders)) {
+          const map = new Map<string, Order>();
+          matchingOrders.forEach(o => map.set(o.id, o));
+          const sorted = Array.from(map.values()).sort((a,b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+          setActiveOrders(sorted);
+        }
       } catch (err) {
         console.error('Error loading session orders:', err);
       }
@@ -221,15 +226,32 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
       sse.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
-          if (msg.type === 'ORDER_STATUS_CHANGED') {
+          if (msg.type === 'ORDER_CREATED' && msg.payload.establishmentId === establishmentId && msg.payload.order.tableId === tableId) {
+            const newOrd: Order = msg.payload.order;
+            setSessionOrderIds(prev => {
+              if (!prev.includes(newOrd.id)) {
+                const next = [...prev, newOrd.id];
+                try {
+                  localStorage.setItem(`mimenu_orders_${establishmentId}_${tableId}`, JSON.stringify(next));
+                } catch (err) {}
+                return next;
+              }
+              return prev;
+            });
+            setActiveOrders(prev => {
+              const map = new Map<string, Order>();
+              map.set(newOrd.id, newOrd);
+              prev.forEach(o => map.set(o.id, o));
+              return Array.from(map.values()).sort((a,b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+            });
+          } else if (msg.type === 'ORDER_STATUS_CHANGED') {
             const updatedOrder: Order = msg.payload.order;
             if (sessionOrderIds.includes(updatedOrder.id)) {
               setActiveOrders(prev => {
-                const index = prev.findIndex(o => o.id === updatedOrder.id);
-                if (index === -1) return [updatedOrder, ...prev];
-                const clone = [...prev];
-                clone[index] = updatedOrder;
-                return clone;
+                const map = new Map<string, Order>();
+                prev.forEach(o => map.set(o.id, o));
+                map.set(updatedOrder.id, updatedOrder);
+                return Array.from(map.values()).sort((a,b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
               });
             }
           } else if (msg.type === 'MENU_CHANGED' && msg.payload.establishmentId === establishmentId) {
@@ -361,9 +383,17 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
       const orderObj: Order = await res.json();
 
       // Store in session list
-      const updatedSessions = [...sessionOrderIds, orderObj.id];
+      const updatedSessions = Array.from(new Set([...sessionOrderIds, orderObj.id]));
       setSessionOrderIds(updatedSessions);
       localStorage.setItem(`mimenu_orders_${establishmentId}_${tableId}`, JSON.stringify(updatedSessions));
+
+      // Immediately display order in Active Table Orders UI
+      setActiveOrders(prev => {
+        const map = new Map<string, Order>();
+        map.set(orderObj.id, orderObj);
+        prev.forEach(o => map.set(o.id, o));
+        return Array.from(map.values()).sort((a,b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      });
 
       // Reset local cart and close
       setCart([]);
@@ -536,9 +566,20 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
                           <p className={`text-xs font-mono font-bold ${classes.textSecondary}`}>{t.orderId}{ord.id.slice(-4)}</p>
                           <span className={`text-[10px] ${classes.textMuted} font-mono`}>({timeStr})</span>
                         </div>
-                        <p className={`text-[11px] ${classes.textMuted} mt-1 line-clamp-1`}>
-                          {ord.items.map(i => `${i.quantity}x ${i.name}`).join(', ')}
-                        </p>
+                        <div className="mt-1 space-y-1">
+                          {ord.items.map((i, iIdx) => (
+                            <div key={i.id || iIdx}>
+                              <p className={`text-[11px] ${classes.textMuted}`}>
+                                <span className="font-bold">{i.quantity}x</span> {i.name}
+                              </p>
+                              {i.comment && (
+                                <p className="text-[10px] text-amber-500 italic pl-2.5 border-l-2 border-amber-500/50 mt-0.5">
+                                  "{i.comment}"
+                                </p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
                       </div>
                       <span className={`text-[9px] uppercase font-black px-2.5 py-0.5 ${classes.radiusPill} border flex items-center space-x-1 ${getStatusColor(ord.status)}`}>
                         {getStatusIcon(ord.status)}
@@ -836,7 +877,7 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
                             </span>
                             <button
                               id={`btn-cart-plus-${cartItem.item.id}`}
-                              onClick={() => addToCart(cartItem.item.id as any)}
+                              onClick={() => addToCart(cartItem.item)}
                               className={`w-6 h-6 ${classes.radiusBtn} ${classes.secondaryBtn} flex items-center justify-center font-bold text-xs`}
                             >
                               <Plus className="w-3 h-3" />

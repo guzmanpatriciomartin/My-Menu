@@ -175,7 +175,11 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       if (Array.isArray(catRes)) setCategories(catRes);
       if (Array.isArray(menuRes)) setMenuItems(menuRes);
       if (Array.isArray(tabRes)) setTables(tabRes);
-      if (Array.isArray(ordRes)) setOrders(ordRes);
+      if (Array.isArray(ordRes)) {
+        const orderMap = new Map<string, Order>();
+        ordRes.forEach((o: Order) => orderMap.set(o.id, o));
+        setOrders(Array.from(orderMap.values()));
+      }
 
       // Sound notification triggers on new orders count raising (RF-A03)
       const currentReceivedOrders = Array.isArray(ordRes)
@@ -1415,9 +1419,16 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                             <span className="font-bold text-xs text-zinc-200">{ord.tableName}</span>
                             <span className="text-[10px] text-zinc-550 font-mono">({localTime})</span>
                           </div>
-                          <p className="text-xs text-slate-400">
-                            {ord.items.map(i => `${i.quantity}x ${i.name}`).join(', ')}
-                          </p>
+                          <div className="text-xs text-slate-400 space-y-0.5">
+                            {ord.items.map((i, iIdx) => (
+                              <div key={i.id || iIdx}>
+                                <span>{i.quantity}x {i.name}</span>
+                                {i.comment && (
+                                  <span className="text-[10px] text-amber-400 italic ml-2">("{i.comment}")</span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
                           {ord.status === 'Cancelado' && ord.cancellationReason && (
                             <p className="text-[10px] text-rose-400 font-mono italic">
                               Motivo cancelación: "{ord.cancellationReason}"

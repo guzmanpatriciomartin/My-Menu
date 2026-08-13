@@ -1,4 +1,15 @@
-import { db } from '../lib/firebase-admin';
+import { db } from '../lib/firebase';
+import {
+  collection,
+  doc,
+  setDoc,
+  deleteDoc,
+  onSnapshot,
+  getDocs,
+  query,
+  limit,
+  writeBatch
+} from 'firebase/firestore';
 import { initialEstablishments, initialCategories, initialMenuItems, initialTables } from '../db/seedData';
 import { Establishment, Category, MenuItem, Table, Order, OrderItem, OrderStatus } from '../types';
 
@@ -144,24 +155,67 @@ class Store {
   // call notifyClients. SSE notifications are emitted by the mutations themselves,
   // which carry the establishmentId needed for tenant/table segmentation (point 7).
   private attachListeners() {
-    db.collection('establishments').onSnapshot(
-      (snap) => { this.data.establishments = snap.docs.map((d) => d.data() as Establishment); },
+    onSnapshot(
+      collection(db, 'establishments'),
+      (snap) => {
+        const docs = snap.docs.map((d) => d.data() as Establishment);
+        if (docs.length > 0) {
+          const map = new Map<string, Establishment>();
+          docs.forEach((d) => map.set(d.id, d));
+          this.data.establishments.forEach((d) => { if (!map.has(d.id)) map.set(d.id, d); });
+          this.data.establishments = Array.from(map.values());
+        }
+      },
       (err) => console.error('[Firestore establishments listener]', err)
     );
-    db.collection('categories').onSnapshot(
-      (snap) => { this.data.categories = snap.docs.map((d) => d.data() as Category); },
+    onSnapshot(
+      collection(db, 'categories'),
+      (snap) => {
+        const docs = snap.docs.map((d) => d.data() as Category);
+        if (docs.length > 0) {
+          const map = new Map<string, Category>();
+          docs.forEach((d) => map.set(d.id, d));
+          this.data.categories.forEach((d) => { if (!map.has(d.id)) map.set(d.id, d); });
+          this.data.categories = Array.from(map.values());
+        }
+      },
       (err) => console.error('[Firestore categories listener]', err)
     );
-    db.collection('menuItems').onSnapshot(
-      (snap) => { this.data.menuItems = snap.docs.map((d) => d.data() as MenuItem); },
+    onSnapshot(
+      collection(db, 'menuItems'),
+      (snap) => {
+        const docs = snap.docs.map((d) => d.data() as MenuItem);
+        if (docs.length > 0) {
+          const map = new Map<string, MenuItem>();
+          docs.forEach((d) => map.set(d.id, d));
+          this.data.menuItems.forEach((d) => { if (!map.has(d.id)) map.set(d.id, d); });
+          this.data.menuItems = Array.from(map.values());
+        }
+      },
       (err) => console.error('[Firestore menuItems listener]', err)
     );
-    db.collection('tables').onSnapshot(
-      (snap) => { this.data.tables = snap.docs.map((d) => d.data() as Table); },
+    onSnapshot(
+      collection(db, 'tables'),
+      (snap) => {
+        const docs = snap.docs.map((d) => d.data() as Table);
+        if (docs.length > 0) {
+          const map = new Map<string, Table>();
+          docs.forEach((d) => map.set(d.id, d));
+          this.data.tables.forEach((d) => { if (!map.has(d.id)) map.set(d.id, d); });
+          this.data.tables = Array.from(map.values());
+        }
+      },
       (err) => console.error('[Firestore tables listener]', err)
     );
-    db.collection('orders').onSnapshot(
-      (snap) => { this.data.orders = snap.docs.map((d) => d.data() as Order); },
+    onSnapshot(
+      collection(db, 'orders'),
+      (snap) => {
+        const docs = snap.docs.map((d) => d.data() as Order);
+        const map = new Map<string, Order>();
+        docs.forEach((d) => map.set(d.id, d));
+        this.data.orders.forEach((d) => { if (!map.has(d.id)) map.set(d.id, d); });
+        this.data.orders = Array.from(map.values());
+      },
       (err) => console.error('[Firestore orders listener]', err)
     );
   }
@@ -170,12 +224,12 @@ class Store {
   // run on every boot: it never touches a collection that already has documents.
   private async seedIfEmpty() {
     for (const { name, items } of SEED_COLLECTIONS) {
-      const snap = await db.collection(name).limit(1).get();
+      const snap = await getDocs(query(collection(db, name), limit(1)));
       if (snap.empty) {
         console.log(`[Firestore] Seeding empty collection "${name}"...`);
-        const batch = db.batch();
+        const batch = writeBatch(db);
         for (const item of items) {
-          batch.set(db.collection(name).doc(item.id), item as Record<string, unknown>);
+          batch.set(doc(db, name, item.id), item as Record<string, unknown>);
         }
         await batch.commit();
       }
@@ -188,9 +242,9 @@ class Store {
   public async seedAllDemoData(): Promise<boolean> {
     console.log('[Firestore] Force-seeding all demo data...');
     for (const { name, items } of SEED_COLLECTIONS) {
-      const batch = db.batch();
+      const batch = writeBatch(db);
       for (const item of items) {
-        batch.set(db.collection(name).doc(item.id), item as Record<string, unknown>);
+        batch.set(doc(db, name, item.id), item as Record<string, unknown>);
       }
       await batch.commit();
     }
@@ -299,7 +353,11 @@ class Store {
       paymentStatus: null,
     };
 
-    await db.collection('orders').doc(newOrder.id).set(newOrder);
+    try {
+      await setDoc(doc(db, 'orders', newOrder.id), newOrder);
+    } catch (err) {
+      console.error('[Firestore] Order save error, persisting in memory:', err);
+    }
     this.data.orders.push(newOrder);
     this.notifyClients('ORDER_CREATED', { establishmentId, order: newOrder });
     return { ok: true, order: newOrder };
@@ -321,7 +379,11 @@ class Store {
       updatedAt: new Date().toISOString(),
     };
 
-    await db.collection('orders').doc(updated.id).set(updated);
+    try {
+      await setDoc(doc(db, 'orders', updated.id), updated);
+    } catch (e) {
+      console.error('[Firestore] Order status write error:', e);
+    }
     this.data.orders[orderIndex] = updated;
     this.notifyClients('ORDER_STATUS_CHANGED', { establishmentId: updated.establishmentId, order: updated });
     return updated;
@@ -339,7 +401,11 @@ class Store {
       }
     }
 
-    await db.collection('menuItems').doc(item.id).set(item);
+    try {
+      await setDoc(doc(db, 'menuItems', item.id), item);
+    } catch (e) {
+      console.error('[Firestore] saveMenuItem error:', e);
+    }
     if (index !== -1) {
       this.data.menuItems[index] = item;
     } else {
@@ -355,7 +421,11 @@ class Store {
     );
     if (index === -1) return false;
 
-    await db.collection('menuItems').doc(itemId).delete();
+    try {
+      await deleteDoc(doc(db, 'menuItems', itemId));
+    } catch (e) {
+      console.error('[Firestore] deleteMenuItem error:', e);
+    }
     this.data.menuItems.splice(index, 1);
     this.notifyClients('MENU_CHANGED', { establishmentId });
     return true;
@@ -373,7 +443,11 @@ class Store {
       }
     }
 
-    await db.collection('categories').doc(category.id).set(category);
+    try {
+      await setDoc(doc(db, 'categories', category.id), category);
+    } catch (e) {
+      console.error('[Firestore] saveCategory error:', e);
+    }
     if (index !== -1) {
       this.data.categories[index] = category;
     } else {
@@ -394,12 +468,16 @@ class Store {
       (m) => m.categoryId === categoryId && m.establishmentId === establishmentId
     );
 
-    const batch = db.batch();
-    batch.delete(db.collection('categories').doc(categoryId));
-    for (const m of cascadingItems) {
-      batch.delete(db.collection('menuItems').doc(m.id));
+    try {
+      const batch = writeBatch(db);
+      batch.delete(doc(db, 'categories', categoryId));
+      for (const m of cascadingItems) {
+        batch.delete(doc(db, 'menuItems', m.id));
+      }
+      await batch.commit();
+    } catch (e) {
+      console.error('[Firestore] deleteCategory error:', e);
     }
-    await batch.commit();
 
     this.data.categories.splice(index, 1);
     this.data.menuItems = this.data.menuItems.filter(
@@ -421,7 +499,11 @@ class Store {
       }
     }
 
-    await db.collection('tables').doc(table.id).set(table);
+    try {
+      await setDoc(doc(db, 'tables', table.id), table);
+    } catch (e) {
+      console.error('[Firestore] saveTable error:', e);
+    }
     if (index !== -1) {
       this.data.tables[index] = table;
     } else {
@@ -437,7 +519,11 @@ class Store {
     );
     if (index === -1) return false;
 
-    await db.collection('tables').doc(tableId).delete();
+    try {
+      await deleteDoc(doc(db, 'tables', tableId));
+    } catch (e) {
+      console.error('[Firestore] deleteTable error:', e);
+    }
     this.data.tables.splice(index, 1);
     this.notifyClients('TABLES_CHANGED', { establishmentId });
     return true;
