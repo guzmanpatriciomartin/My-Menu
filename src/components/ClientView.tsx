@@ -149,6 +149,10 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
   const [tables, setTables] = useState<Table[]>([]);
   const [loading, setLoading] = useState(true);
   
+  // When the current sitting started. Compared against the table's closedAt so a past
+  // close does not terminate the session of the next diner.
+  const sessionStartKey = `mimenu_session_start_${establishmentId}_${tableId}`;
+
   // Diner name session state
   const [dinerName, setDinerName] = useState<string>(() => {
     try {
@@ -407,6 +411,9 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
     try {
       localStorage.removeItem(`mimenu_orders_${establishmentId}_${tableId}`);
       localStorage.removeItem(`mimenu_diner_${establishmentId}_${tableId}`);
+      // Dropped too, so the next diner stamps a fresh start instead of inheriting one
+      // older than the close that just happened.
+      localStorage.removeItem(sessionStartKey);
     } catch (err) {}
     setSessionOrderIds([]);
     setActiveOrders([]);
@@ -416,16 +423,41 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
     setSessionEnded(true);
   };
 
-  // Check if table session was closed by admin (polling check)
+  // Check if the table was closed by the staff (polling).
+  //
+  // The server remembers the LAST closedAt of a table indefinitely, so "closedAt exists"
+  // is not enough to end a session: after a close, the next diner would be wiped and
+  // re-prompted for their name every poll. We only end the session when the table was
+  // closed AFTER this sitting started.
   useEffect(() => {
+    if (sessionEnded) return; // already finished — nothing left to wipe
+
     const checkSessionStatus = async () => {
       try {
         const res = await fetch(`/api/establishments/${establishmentId}/tables/${tableId}/session`);
-        if (res.ok) {
-          const data = await res.json();
-          if (data.closedAt) {
-            handleEndClientSession();
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data.closedAt) return;
+
+        const startedAt = (() => {
+          try {
+            return localStorage.getItem(sessionStartKey);
+          } catch {
+            return null;
           }
+        })();
+
+        // No stamp means this session predates the fix; treat the close as already
+        // consumed and stamp now, so an old close cannot loop the UI.
+        if (!startedAt) {
+          try {
+            localStorage.setItem(sessionStartKey, new Date().toISOString());
+          } catch (err) {}
+          return;
+        }
+
+        if (new Date(data.closedAt).getTime() > new Date(startedAt).getTime()) {
+          handleEndClientSession();
         }
       } catch (e) {
         // ignore network error during polling
@@ -434,7 +466,7 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
 
     const interval = setInterval(checkSessionStatus, 4000);
     return () => clearInterval(interval);
-  }, [establishmentId, tableId]);
+  }, [establishmentId, tableId, sessionEnded]);
 
   // Send table call to waiter / request bill
   const handleSendTableCall = async (type: 'waiter_call' | 'bill_request') => {
@@ -1193,6 +1225,10 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
                 setDinerName(trimmed);
                 try {
                   localStorage.setItem(`mimenu_diner_${establishmentId}_${tableId}`, trimmed);
+                  // Stamp when this sitting began. The server keeps the last closedAt of
+                  // the table forever, so without this the previous close would keep
+                  // killing every new session (see the session poll below).
+                  localStorage.setItem(sessionStartKey, new Date().toISOString());
                 } catch (err) {}
                 setIsWelcomeModalOpen(false);
               }} className="space-y-4">
