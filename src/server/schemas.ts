@@ -31,10 +31,28 @@ const orderDraftItemSchema = z
 export const createOrderSchema = z
   .object({
     tableId: nonEmpty,
+    dinerName: z.string().max(100).optional(),
     items: z.array(orderDraftItemSchema).min(1).max(100),
   })
   .strict();
 export type CreateOrderBody = z.infer<typeof createOrderSchema>;
+
+// --- Table calls & Session ---
+export const createTableCallSchema = z
+  .object({
+    tableId: nonEmpty,
+    dinerName: z.string().max(100).optional(),
+    type: z.enum(['waiter_call', 'bill_request']),
+  })
+  .strict();
+export type CreateTableCallBody = z.infer<typeof createTableCallSchema>;
+
+export const updateTableCallSchema = z
+  .object({
+    status: z.enum(['pending', 'attended']),
+  })
+  .strict();
+export type UpdateTableCallBody = z.infer<typeof updateTableCallSchema>;
 
 // ALTO-1: diner order lookup is scoped and bounded (max 50 ids).
 export const orderLookupSchema = z

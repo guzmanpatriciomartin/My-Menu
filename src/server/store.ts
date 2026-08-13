@@ -11,7 +11,7 @@ import {
   writeBatch
 } from 'firebase/firestore';
 import { initialEstablishments, initialCategories, initialMenuItems, initialTables } from '../db/seedData';
-import { Establishment, Category, MenuItem, Table, Order, OrderItem, OrderStatus } from '../types';
+import { Establishment, Category, MenuItem, Table, Order, OrderItem, OrderStatus, TableCall } from '../types';
 
 interface DbSchema {
   establishments: Establishment[];
@@ -47,6 +47,7 @@ export interface OrderDraftItem {
 export interface CreateOrderInput {
   establishmentId: string;
   tableId: string;
+  dinerName?: string;
   items: OrderDraftItem[];
 }
 
@@ -61,7 +62,7 @@ export interface CreateOrderResult {
   unavailableItems?: string[];
 }
 
-type NotifyType = 'ORDER_CREATED' | 'ORDER_STATUS_CHANGED' | 'MENU_CHANGED' | 'TABLES_CHANGED';
+type NotifyType = 'ORDER_CREATED' | 'ORDER_STATUS_CHANGED' | 'MENU_CHANGED' | 'TABLES_CHANGED' | 'TABLE_CALL_CREATED' | 'TABLE_SESSION_CLOSED';
 
 interface NotifyPayload {
   establishmentId: string;
@@ -134,6 +135,8 @@ class Store {
   };
 
   private sseClients: SseClient[] = [];
+  private tableCalls: TableCall[] = [];
+  private closedSessions: Map<string, string> = new Map();
 
   constructor() {
     this.initFirebaseSync();
@@ -213,10 +216,19 @@ class Store {
         const docs = snap.docs.map((d) => d.data() as Order);
         const map = new Map<string, Order>();
         docs.forEach((d) => map.set(d.id, d));
-        this.data.orders.forEach((d) => { if (!map.has(d.id)) map.set(d.id, d); });
         this.data.orders = Array.from(map.values());
       },
       (err) => console.error('[Firestore orders listener]', err)
+    );
+    onSnapshot(
+      collection(db, 'tableCalls'),
+      (snap) => {
+        const docs = snap.docs.map((d) => d.data() as TableCall);
+        const map = new Map<string, TableCall>();
+        docs.forEach((d) => map.set(d.id, d));
+        this.tableCalls = Array.from(map.values());
+      },
+      (err) => console.error('[Firestore tableCalls listener]', err)
     );
   }
 
@@ -316,7 +328,7 @@ class Store {
       const menuItem = this.data.menuItems.find(
         (m) => m.id === draft.menuItemId && m.establishmentId === establishmentId
       );
-      if (!menuItem || !menuItem.available) {
+      if (!menuItem || menuItem.available === false) {
         unavailableItems.push(draft.menuItemId);
         continue;
       }
@@ -346,6 +358,7 @@ class Store {
       establishmentId,
       tableId,
       tableName: table.name, // derived server-side, never trusted from the client
+      dinerName: input.dinerName ? input.dinerName.slice(0, 100) : undefined,
       items: resolvedItems,
       status: 'Recibido', // server-authoritative initial status
       createdAt: now,
@@ -527,6 +540,108 @@ class Store {
     this.data.tables.splice(index, 1);
     this.notifyClients('TABLES_CHANGED', { establishmentId });
     return true;
+  }
+
+  // Table Calls & Notifications
+  public getTableCalls(establishmentId: string): TableCall[] {
+    return this.tableCalls
+      .filter((c) => c.establishmentId === establishmentId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  public async createTableCall(input: {
+    establishmentId: string;
+    tableId: string;
+    dinerName?: string;
+    type: 'waiter_call' | 'bill_request';
+  }): Promise<TableCall | null> {
+    const table = this.data.tables.find(
+      (t) => t.id === input.tableId && t.establishmentId === input.establishmentId
+    );
+    if (!table) return null;
+
+    const newCall: TableCall = {
+      id: 'call-' + Math.random().toString(36).substring(2, 9),
+      establishmentId: input.establishmentId,
+      tableId: input.tableId,
+      tableName: table.name,
+      dinerName: input.dinerName || 'Comensal',
+      type: input.type,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    };
+
+    try {
+      await setDoc(doc(db, 'tableCalls', newCall.id), newCall);
+    } catch (e) {
+      console.error('[Firestore] createTableCall error:', e);
+    }
+    this.tableCalls.push(newCall);
+    this.notifyClients('TABLE_CALL_CREATED', { establishmentId: input.establishmentId });
+    return newCall;
+  }
+
+  public async updateTableCallStatus(
+    callId: string,
+    establishmentId: string,
+    status: 'pending' | 'attended'
+  ): Promise<TableCall | null> {
+    const index = this.tableCalls.findIndex(
+      (c) => c.id === callId && c.establishmentId === establishmentId
+    );
+    if (index === -1) return null;
+
+    const updated: TableCall = { ...this.tableCalls[index], status };
+    try {
+      await setDoc(doc(db, 'tableCalls', updated.id), updated);
+    } catch (e) {
+      console.error('[Firestore] updateTableCallStatus error:', e);
+    }
+    this.tableCalls[index] = updated;
+    this.notifyClients('TABLE_CALL_CREATED', { establishmentId });
+    return updated;
+  }
+
+  // Close Table Session (Admin Action)
+  public async closeTableSession(
+    establishmentId: string,
+    tableId: string
+  ): Promise<{ ok: boolean; closedAt: string; ordersClosedCount: number }> {
+    const closedAt = new Date().toISOString();
+    const sessionKey = `${establishmentId}_${tableId}`;
+    this.closedSessions.set(sessionKey, closedAt);
+
+    // 1. Mark all active non-finalized orders for this table as 'Entregado' so they are archived as delivered sales
+    let ordersClosedCount = 0;
+    const activeTableOrders = this.data.orders.filter(
+      (o) =>
+        o.establishmentId === establishmentId &&
+        o.tableId === tableId &&
+        o.status !== 'Entregado' &&
+        o.status !== 'Cancelado'
+    );
+
+    for (const order of activeTableOrders) {
+      await this.updateOrderStatus(order.id, establishmentId, 'Entregado');
+      ordersClosedCount++;
+    }
+
+    // 2. Mark pending calls for this table as 'attended'
+    const pendingCalls = this.tableCalls.filter(
+      (c) => c.establishmentId === establishmentId && c.tableId === tableId && c.status === 'pending'
+    );
+    for (const call of pendingCalls) {
+      await this.updateTableCallStatus(call.id, establishmentId, 'attended');
+    }
+
+    this.notifyClients('TABLE_SESSION_CLOSED', { establishmentId });
+    return { ok: true, closedAt, ordersClosedCount };
+  }
+
+  public getTableSessionStatus(establishmentId: string, tableId: string): { closedAt?: string } {
+    const sessionKey = `${establishmentId}_${tableId}`;
+    const closedAt = this.closedSessions.get(sessionKey);
+    return { closedAt };
   }
 
   // SSE Subscription handlers

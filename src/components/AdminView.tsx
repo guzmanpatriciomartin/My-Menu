@@ -29,7 +29,7 @@ import {
   CheckCircle,
   RefreshCw
 } from 'lucide-react';
-import { Establishment, Category, MenuItem, Table, Order, OrderStatus, UserSession, UserRole } from '../types';
+import { Establishment, Category, MenuItem, Table, Order, OrderStatus, UserSession, UserRole, TableCall } from '../types';
 import { playNewOrderSound, playAlertSound } from './SoundUtility';
 import { useTheme } from '../theme/ThemeContext';
 import ThemeTriggerButton from './ThemeTriggerButton';
@@ -62,6 +62,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
   const [tables, setTables] = useState<Table[]>([]);
   const [orders, setOrders] = useState<Order[]>([]);
+  const [tableCalls, setTableCalls] = useState<TableCall[]>([]);
   
   // Active states
   const [loading, setLoading] = useState(true);
@@ -91,8 +92,9 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   const [menuCatFilter, setMenuCatFilter] = useState('all');
   const [historyTableFilter, setHistoryTableFilter] = useState('all');
 
-  // Store pre-played order count to detect new orders and synthesize chime
+  // Store pre-played order and call count to detect new events and synthesize chime
   const orderCountRef = useRef<number>(0);
+  const callCountRef = useRef<number>(0);
 
   // Real auth against the server (RF-A01, RF-A13 role validation).
   const doLogin = async (emailToUse: string, passwordToUse: string) => {
@@ -163,39 +165,80 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     if (!currentUser) return;
     const estId = currentUser.establishmentId;
     try {
-      const [estRes, catRes, menuRes, tabRes, ordRes] = await Promise.all([
+      const [estRes, catRes, menuRes, tabRes, ordRes, callsRes] = await Promise.all([
         fetch('/api/establishments', { credentials: 'include' }).then(r => r.json()),
         fetch(`/api/establishments/${estId}/categories`, { credentials: 'include' }).then(r => r.json()),
         fetch(`/api/establishments/${estId}/menu-items`, { credentials: 'include' }).then(r => r.json()),
         fetch(`/api/establishments/${estId}/tables`, { credentials: 'include' }).then(r => r.json()),
-        fetch('/api/my/orders', { credentials: 'include' }).then(r => r.json())
+        fetch('/api/my/orders', { credentials: 'include' }).then(r => r.json()),
+        fetch('/api/my/calls', { credentials: 'include' }).then(r => r.json()).catch(() => [])
       ]);
 
       if (Array.isArray(estRes)) setEstablishments(estRes);
       if (Array.isArray(catRes)) setCategories(catRes);
       if (Array.isArray(menuRes)) setMenuItems(menuRes);
       if (Array.isArray(tabRes)) setTables(tabRes);
+      if (Array.isArray(callsRes)) setTableCalls(callsRes);
       if (Array.isArray(ordRes)) {
         const orderMap = new Map<string, Order>();
         ordRes.forEach((o: Order) => orderMap.set(o.id, o));
         setOrders(Array.from(orderMap.values()));
       }
 
-      // Sound notification triggers on new orders count raising (RF-A03)
+      // Sound notification triggers on new orders count raising or new pending calls (RF-A03)
       const currentReceivedOrders = Array.isArray(ordRes)
         ? ordRes.filter((o: Order) => o.status === 'Recibido').length
         : 0;
-      if (orderCountRef.current !== null && currentReceivedOrders > orderCountRef.current) {
+      const currentPendingCalls = Array.isArray(callsRes)
+        ? callsRes.filter((c: TableCall) => c.status === 'pending').length
+        : 0;
+
+      if ((orderCountRef.current !== null && currentReceivedOrders > orderCountRef.current) ||
+          (callCountRef.current !== null && currentPendingCalls > callCountRef.current)) {
         if (soundEnabled) {
           playNewOrderSound();
         }
       }
       orderCountRef.current = currentReceivedOrders;
+      callCountRef.current = currentPendingCalls;
 
     } catch (err) {
       console.error('Error fetching admin data', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleAttendCall = async (callId: string) => {
+    try {
+      const res = await fetch(`/api/calls/${callId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ status: 'attended' })
+      });
+      if (res.ok) {
+        fetchDbState();
+      }
+    } catch (err) {
+      console.error('Error attending call', err);
+    }
+  };
+
+  const handleCloseTableSession = async (tableId: string, tableName: string) => {
+    if (!window.confirm(`¿Estás seguro/a de cerrar manualmente la mesa "${tableName}"?\n\nEsto finalizará la sesión del cliente de forma inmediata y registrará las compras del comensal.`)) {
+      return;
+    }
+    try {
+      const res = await fetch(`/api/tables/${tableId}/close`, {
+        method: 'POST',
+        credentials: 'include'
+      });
+      if (res.ok) {
+        fetchDbState();
+      }
+    } catch (err) {
+      console.error('Error closing table session', err);
     }
   };
 
@@ -232,11 +275,11 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       sse.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
-          if (msg.type === 'ORDER_CREATED' && msg.payload.establishmentId === activeEstId) {
+          if ((msg.type === 'ORDER_CREATED' || msg.type === 'TABLE_CALL_CREATED') && msg.payload.establishmentId === activeEstId) {
             // Hot trigger sound and pull fresh lists
             if (soundEnabled) playNewOrderSound();
             fetchDbState();
-          } else if (msg.type === 'ORDER_STATUS_CHANGED' && msg.payload.establishmentId === activeEstId) {
+          } else if ((msg.type === 'ORDER_STATUS_CHANGED' || msg.type === 'TABLE_SESSION_CLOSED') && msg.payload.establishmentId === activeEstId) {
             fetchDbState();
           }
         } catch (e) {
@@ -460,6 +503,10 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     return orders.filter(o => o.status !== 'Entregado' && o.status !== 'Cancelado');
   }, [orders]);
 
+  const pendingCalls = useMemo(() => {
+    return tableCalls.filter(c => c.status === 'pending');
+  }, [tableCalls]);
+
   const historyOrdersList = useMemo(() => {
     let list = orders.filter(o => o.status === 'Entregado' || o.status === 'Cancelado');
     if (historyTableFilter !== 'all') {
@@ -614,31 +661,31 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     else if (loginEmail === 'sofia@mimenu.com') selectedUserKey = 'sofia';
 
     return (
-      <div className="min-h-screen bg-zinc-950 flex flex-col items-center justify-center p-6 selection:bg-amber-500 selection:text-zinc-950 font-sans">
-        <div id="login-container" className="max-w-md w-full bg-zinc-900 border border-zinc-800 rounded-none p-8 relative overflow-hidden">
+      <div className={`min-h-screen ${classes.bgApp} flex flex-col items-center justify-center p-6 selection:bg-amber-500 selection:text-zinc-950 font-sans transition-colors duration-300`}>
+        <div id="login-container" className={`max-w-md w-full ${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-8 relative overflow-hidden shadow-2xl`}>
           
-          <div className="absolute top-0 left-0 right-0 h-1 bg-white"></div>
+          <div className="absolute top-0 left-0 right-0 h-1 bg-amber-500"></div>
 
           <div className="text-center mb-6">
-            <h1 className="text-xl font-black text-white tracking-widest flex items-center justify-center space-x-2.5 uppercase">
-              <ClipboardList className="w-5 h-5 text-white" />
+            <h1 className={`text-xl font-black ${classes.textPrimary} tracking-widest flex items-center justify-center space-x-2.5 uppercase`}>
+              <ClipboardList className="w-5 h-5 text-amber-500" />
               <span>Mi Menu · Gestión</span>
             </h1>
-            <p className="text-[10px] font-mono tracking-wider uppercase text-zinc-500 mt-2">
+            <p className={`text-[10px] font-mono tracking-wider uppercase ${classes.textMuted} mt-2`}>
               Soporte multi-establecimiento & comandas QR
             </p>
           </div>
 
           <form onSubmit={handleLogin} className="space-y-5">
             <div>
-              <label className="block text-[10px] font-black text-zinc-300 uppercase tracking-widest mb-2 font-mono">
+              <label className={`block text-[10px] font-black ${classes.textSecondary} uppercase tracking-widest mb-2 font-mono`}>
                 Seleccionar Establecimiento & Cuenta
               </label>
               <select
                 id="demo-user-selector"
                 value={selectedUserKey}
                 disabled={isLoggingIn}
-                className="w-full bg-zinc-950 border border-zinc-800 p-3.5 rounded-none text-xs text-zinc-200 focus:outline-none focus:border-white font-mono uppercase tracking-wide cursor-pointer disabled:opacity-50"
+                className={`w-full ${classes.inputBg} border ${classes.inputBorder} ${classes.radiusCard} p-3.5 text-xs ${classes.textPrimary} focus:outline-none font-mono uppercase tracking-wide cursor-pointer disabled:opacity-50`}
                 onChange={(e) => {
                   const val = e.target.value;
                   if (val === 'carolina') fillAndLogin('carolina@mimenu.com', 'admin');
@@ -660,7 +707,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
             </div>
 
             <div>
-              <label className="block text-[10px] font-black text-zinc-300 uppercase tracking-widest mb-2 font-mono">
+              <label className={`block text-[10px] font-black ${classes.textSecondary} uppercase tracking-widest mb-2 font-mono`}>
                 Correo Electrónico
               </label>
               <input
@@ -669,13 +716,13 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 value={loginEmail}
                 onChange={(e) => setLoginEmail(e.target.value)}
                 disabled={isLoggingIn}
-                className="w-full bg-zinc-950 border border-zinc-800 p-3.5 rounded-none text-xs text-zinc-200 focus:outline-none focus:border-white font-medium disabled:opacity-50"
+                className={`w-full ${classes.inputBg} border ${classes.inputBorder} ${classes.radiusCard} p-3.5 text-xs ${classes.textPrimary} focus:outline-none font-medium disabled:opacity-50`}
                 required
               />
             </div>
 
             <div>
-              <label className="block text-[10px] font-black text-zinc-300 uppercase tracking-widest mb-2 font-mono">
+              <label className={`block text-[10px] font-black ${classes.textSecondary} uppercase tracking-widest mb-2 font-mono`}>
                 Contraseña
               </label>
               <input
@@ -684,13 +731,13 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 value={loginPassword}
                 onChange={(e) => setLoginPassword(e.target.value)}
                 disabled={isLoggingIn}
-                className="w-full bg-zinc-950 border border-zinc-800 p-3.5 rounded-none text-xs text-zinc-200 focus:outline-none focus:border-white font-mono disabled:opacity-50"
+                className={`w-full ${classes.inputBg} border ${classes.inputBorder} ${classes.radiusCard} p-3.5 text-xs ${classes.textPrimary} focus:outline-none font-mono disabled:opacity-50`}
                 required
               />
             </div>
 
             {loginError && (
-              <p className="text-[11px] text-rose-400 bg-rose-950/10 border border-rose-900/30 p-3 rounded-none flex items-center font-medium">
+              <p className={`text-[11px] text-rose-400 bg-rose-950/10 border border-rose-900/30 p-3 ${classes.radiusCard} flex items-center font-medium`}>
                 <AlertTriangle className="w-4 h-4 mr-2 shrink-0 text-rose-400" />
                 {loginError}
               </p>
@@ -700,11 +747,11 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               id="btn-login"
               type="submit"
               disabled={isLoggingIn}
-              className="w-full py-4 rounded-none font-black text-xs text-black bg-white hover:bg-zinc-200 uppercase tracking-[0.2em] cursor-pointer transition-all disabled:opacity-50 flex items-center justify-center space-x-2"
+              className={`w-full py-4 ${classes.radiusBtn} font-black text-xs text-zinc-950 bg-amber-500 hover:bg-amber-400 uppercase tracking-[0.2em] cursor-pointer transition-all disabled:opacity-50 flex items-center justify-center space-x-2 shadow-lg shadow-amber-500/20`}
             >
               {isLoggingIn ? (
                 <>
-                  <RefreshCw className="w-4 h-4 animate-spin text-black" />
+                  <RefreshCw className="w-4 h-4 animate-spin text-zinc-950" />
                   <span>Ingresando...</span>
                 </>
               ) : (
@@ -714,13 +761,13 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
           </form>
 
           {/* Direct Tenant Quick Selection Buttons */}
-          <div className="mt-6 pt-5 border-t border-zinc-800/80 space-y-3">
-            <p className="text-[10px] font-black text-zinc-400 uppercase tracking-widest font-mono">
+          <div className={`mt-6 pt-5 border-t ${classes.borderCard} space-y-3`}>
+            <p className={`text-[10px] font-black ${classes.textMuted} uppercase tracking-widest font-mono`}>
               Acceso Rápido por Establecimiento:
             </p>
             <div className="space-y-3">
               {demoAccounts.map((group) => (
-                <div key={group.tenantId} className="bg-zinc-950 border border-zinc-800/80 p-3 space-y-2">
+                <div key={group.tenantId} className={`${classes.inputBg} border ${classes.inputBorder} ${classes.radiusCard} p-3 space-y-2`}>
                   <span className="text-[10px] font-bold text-amber-500 font-mono uppercase tracking-wider block">
                     {group.badge} — {group.tenant}
                   </span>
@@ -730,14 +777,14 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                         key={acc.key}
                         type="button"
                         onClick={() => fillAndLogin(acc.email, acc.pass)}
-                        className={`text-left p-2 border transition text-[10px] font-mono cursor-pointer ${
+                        className={`text-left p-2 border transition text-[10px] font-mono cursor-pointer ${classes.radiusBtn} ${
                           loginEmail === acc.email
-                            ? 'bg-zinc-800 border-white text-white font-bold'
-                            : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-700'
+                            ? `${classes.bgCard} border-amber-500 ${classes.textPrimary} font-bold shadow-sm`
+                            : `${classes.inputBg} ${classes.borderCard} ${classes.textMuted} hover:${classes.textPrimary}`
                         }`}
                       >
-                        <p className="text-white font-bold">{acc.name} ({acc.role})</p>
-                        <p className="text-[9px] text-zinc-500 truncate">{acc.email}</p>
+                        <p className={`${classes.textPrimary} font-bold`}>{acc.name} ({acc.role})</p>
+                        <p className={`text-[9px] ${classes.textMuted} truncate`}>{acc.email}</p>
                       </button>
                     ))}
                   </div>
@@ -746,11 +793,11 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
             </div>
           </div>
 
-          <div className="mt-6 pt-4 border-t border-zinc-800/80 flex items-center justify-between text-[10px] text-zinc-550 font-mono uppercase tracking-wider">
+          <div className={`mt-6 pt-4 border-t ${classes.borderCard} flex items-center justify-between text-[10px] ${classes.textMuted} font-mono uppercase tracking-wider`}>
             <span>MVP v0.2</span>
             <button 
               onClick={onBackToLauncher}
-              className="text-white hover:underline hover:text-zinc-300 font-bold"
+              className={`${classes.textPrimary} hover:underline font-bold`}
             >
               Volver al Lanzador
             </button>
@@ -761,18 +808,18 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   }
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-white flex flex-col font-sans selection:bg-white selection:text-zinc-950">
+    <div className={`min-h-screen ${classes.bgApp} flex flex-col font-sans transition-colors duration-300 selection:bg-amber-500 selection:text-zinc-950`}>
       
       {/* Dynamic Multi-tenant Header (RF-A11) */}
-      <header className="bg-zinc-950 border-b border-zinc-850 sticky top-0 z-40">
+      <header className={`${classes.bgHeader} ${classes.blurClass} border-b ${classes.borderCard} sticky top-0 z-40 transition-all`}>
         <div className="max-w-7xl mx-auto px-4 md:px-6 py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           
           <div className="flex items-center space-x-3">
-            <ClipboardList className="w-5 h-5 text-white" />
+            <ClipboardList className="w-5 h-5 text-amber-500" />
             <div>
-              <h1 className="text-sm font-black tracking-widest text-white uppercase flex items-center">
+              <h1 className={`text-sm font-black tracking-widest ${classes.textPrimary} uppercase flex items-center`}>
                 Mi Menú · Panel
-                <span className="ml-2.5 text-[9px] bg-zinc-900 text-zinc-300 border border-zinc-800 px-2 py-0.5 rounded-none font-mono font-bold tracking-widest uppercase">
+                <span className={`ml-2.5 text-[9px] ${classes.bgCard} ${classes.textSecondary} border ${classes.borderCard} ${classes.radiusPill} px-2 py-0.5 font-mono font-bold tracking-widest uppercase`}>
                   {currentUser.email} · {currentUser.role === 'admin' ? 'Admin' : 'Mesero'}
                 </span>
               </h1>
@@ -781,13 +828,13 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
 
           {/* Active establishment — fixed to the authenticated tenant, not switchable (RF-A11) */}
           <div className="flex items-center gap-2">
-            <span className="text-[10px] text-zinc-500 font-mono uppercase bg-zinc-950 border border-zinc-850 py-1.5 px-3.5 rounded-none flex items-center tracking-wider">
-              <MapPin className="w-3.5 h-3.5 mr-1.5 text-zinc-400" />
+            <span className={`text-[10px] ${classes.textMuted} font-mono uppercase ${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} py-1.5 px-3.5 flex items-center tracking-wider`}>
+              <MapPin className="w-3.5 h-3.5 mr-1.5 text-amber-500" />
               Establecimiento Activo:
             </span>
             <span
               id="establishment-active-label"
-              className="bg-zinc-950 border border-zinc-850 text-xs px-3 py-2 rounded-none text-white font-bold"
+              className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} text-xs px-3 py-2 ${classes.textPrimary} font-bold`}
             >
               {activeEstablishment?.name || activeEstId}
             </span>
@@ -799,7 +846,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               id="btn-seed-demo-data"
               onClick={handleSeedDemoData}
               disabled={isSeeding}
-              className="px-3 py-2 text-xs font-mono font-bold bg-zinc-900 border border-zinc-800 hover:border-amber-500 text-zinc-200 hover:text-white transition cursor-pointer flex items-center space-x-1.5 disabled:opacity-50 rounded-none"
+              className={`px-3 py-2 text-xs font-mono font-bold ${classes.bgCard} border ${classes.borderCard} ${classes.radiusBtn} hover:border-amber-500 ${classes.textSecondary} hover:${classes.textPrimary} transition cursor-pointer flex items-center space-x-1.5 disabled:opacity-50`}
               title="Cargar o restaurar datos demo de la cafetería y el bodegón"
             >
               <RefreshCw className={`w-3.5 h-3.5 text-amber-500 ${isSeeding ? 'animate-spin' : ''}`} />
@@ -813,10 +860,10 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
             <button
               id="btn-toggle-sound"
               onClick={() => setSoundEnabled(prev => !prev)}
-              className={`p-2 rounded-none border flex items-center justify-center transition-all ${
+              className={`p-2 ${classes.radiusBtn} border flex items-center justify-center transition-all ${
                 soundEnabled 
-                  ? 'bg-zinc-900 border-zinc-750 text-amber-500' 
-                  : 'bg-zinc-950 border-zinc-850 text-zinc-600'
+                  ? `${classes.bgCard} border-amber-500 text-amber-500` 
+                  : `${classes.bgCard} ${classes.borderCard} ${classes.textMuted}`
               }`}
               title={soundEnabled ? 'Silenciar notificaciones' : 'Activar sonido de pedidos'}
             >
@@ -826,7 +873,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
             <button
               id="btn-admin-logout"
               onClick={handleLogout}
-              className="px-3.5 py-2 rounded-none bg-zinc-900 border border-zinc-805 hover:bg-zinc-850 text-xs font-black uppercase tracking-wider text-zinc-400 hover:text-white flex items-center transition cursor-pointer"
+              className={`px-3.5 py-2 ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} hover:bg-rose-500/10 hover:border-rose-500/30 text-xs font-black uppercase tracking-wider ${classes.textMuted} hover:text-rose-400 flex items-center transition cursor-pointer`}
             >
               <Power className="w-3.5 h-3.5 mr-1" />
               Salir
@@ -839,25 +886,32 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       <div className="flex-1 max-w-7xl w-full mx-auto px-4 md:px-6 py-6 flex flex-col md:flex-row gap-6">
         
         {/* Left Side: Layout Navigation rail */}
-        <aside className="w-full md:w-56 shrink-0 flex flex-row md:flex-col gap-1.5 overflow-x-auto scrollbar-none pb-2 md:pb-0 border-b md:border-b-0 md:border-r border-zinc-850 pr-0 md:pr-4">
+        <aside className={`w-full md:w-56 shrink-0 flex flex-row md:flex-col gap-1.5 overflow-x-auto scrollbar-none pb-2 md:pb-0 border-b md:border-b-0 md:border-r ${classes.borderCard} pr-0 md:pr-4`}>
           <button
             id="tab-btn-pedidos"
             onClick={() => setActiveTab('pedidos')}
-            className={`px-4 py-3 rounded-none text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center justify-between transition min-w-[124px] md:w-full shrink-0 border ${
+            className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center justify-between transition min-w-[124px] md:w-full shrink-0 border ${
               activeTab === 'pedidos' 
-                ? 'bg-white text-black border-white' 
-                : 'text-zinc-450 border-transparent bg-transparent hover:text-white hover:border-zinc-800'
+                ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold shadow-md' 
+                : `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
             }`}
           >
             <span className="flex items-center">
               <Bell className="w-4 h-4 mr-2.5" />
               Monitor Pedidos
             </span>
-            {activeOrdersList.length > 0 && (
-              <span id="active-orders-counter" className="text-[9px] font-black bg-red-600 text-white border border-red-500 px-1.5 py-0.5 rounded-none font-mono animate-bounce shrink-0">
-                {activeOrdersList.length}
-              </span>
-            )}
+            <div className="flex items-center space-x-1 shrink-0">
+              {pendingCalls.length > 0 && (
+                <span id="pending-calls-counter" className="text-[9px] font-black bg-amber-500 text-zinc-950 border border-amber-400 px-1.5 py-0.5 rounded-full font-mono animate-pulse shrink-0 flex items-center gap-0.5" title="Llamados de mesa pendientes">
+                  🔔 {pendingCalls.length}
+                </span>
+              )}
+              {activeOrdersList.length > 0 && (
+                <span id="active-orders-counter" className="text-[9px] font-black bg-red-600 text-white border border-red-500 px-1.5 py-0.5 rounded-full font-mono animate-bounce shrink-0" title="Pedidos activos">
+                  {activeOrdersList.length}
+                </span>
+              )}
+            </div>
           </button>
 
           {/* Guard sections dynamically based on waiter role limitations (RF-A13) */}
@@ -866,10 +920,10 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               <button
                 id="tab-btn-diseño_mesas"
                 onClick={() => setActiveTab('diseño_mesas')}
-                className={`px-4 py-3 rounded-none text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center transition min-w-[124px] md:w-full shrink-0 border ${
+                className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center transition min-w-[124px] md:w-full shrink-0 border ${
                   activeTab === 'diseño_mesas' 
-                    ? 'bg-white text-black border-white' 
-                    : 'text-zinc-450 border-transparent bg-transparent hover:text-white hover:border-zinc-800'
+                    ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold shadow-md' 
+                    : `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
                 }`}
               >
                 <Users className="w-4 h-4 mr-2.5" />
@@ -879,10 +933,10 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               <button
                 id="tab-btn-menu_items"
                 onClick={() => setActiveTab('menu_items')}
-                className={`px-4 py-3 rounded-none text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center transition min-w-[124px] md:w-full shrink-0 border ${
+                className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center transition min-w-[124px] md:w-full shrink-0 border ${
                   activeTab === 'menu_items' 
-                    ? 'bg-white text-black border-white' 
-                    : 'text-zinc-450 border-transparent bg-transparent hover:text-white hover:border-zinc-800'
+                    ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold shadow-md' 
+                    : `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
                 }`}
               >
                 <Utensils className="w-4 h-4 mr-2.5" />
@@ -890,20 +944,20 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               </button>
             </>
           ) : (
-            <div className="hidden md:flex flex-col items-center p-4 bg-zinc-900/30 rounded-none border border-zinc-850 text-center space-y-1.5 my-2">
+            <div className={`hidden md:flex flex-col items-center p-4 ${classes.bgCard} ${classes.radiusCard} border ${classes.borderCard} text-center space-y-1.5 my-2`}>
               <ShieldAlert className="w-4.5 h-4.5 text-zinc-500" />
-              <p className="text-[9px] font-black uppercase font-mono text-zinc-400 tracking-wider">Acceso Mesero</p>
-              <p className="text-[9px] text-zinc-550 font-medium">Catálogo de Menú y Mesas bloqueados</p>
+              <p className={`text-[9px] font-black uppercase font-mono ${classes.textMuted} tracking-wider`}>Acceso Mesero</p>
+              <p className={`text-[9px] ${classes.textMuted} font-medium`}>Catálogo de Menú y Mesas bloqueados</p>
             </div>
           )}
 
           <button
             id="tab-btn-historial"
             onClick={() => setActiveTab('historial')}
-            className={`px-4 py-3 rounded-none text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center transition min-w-[124px] md:w-full shrink-0 border ${
+            className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center transition min-w-[124px] md:w-full shrink-0 border ${
               activeTab === 'historial' 
-                ? 'bg-white text-black border-white' 
-                : 'text-zinc-450 border-transparent bg-transparent hover:text-white hover:border-zinc-800'
+                ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold shadow-md' 
+                : `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
             }`}
           >
             <TrendingUp className="w-4 h-4 mr-2.5" />
@@ -913,7 +967,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
           <button
             id="tab-btn-launcher"
             onClick={onBackToLauncher}
-            className="md:mt-auto px-4 py-3 rounded-none text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center text-zinc-400 hover:bg-zinc-900 hover:text-white transition min-w-[124px] md:w-full shrink-0 border border-transparent"
+            className={`md:mt-auto px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center ${classes.textMuted} hover:${classes.bgCard} hover:${classes.textPrimary} transition min-w-[124px] md:w-full shrink-0 border border-transparent`}
           >
             <X className="w-4 h-4 mr-2.5" />
             Lanzador Demo
@@ -928,24 +982,69 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
             <div className="space-y-6">
               
               {/* Header metrics card */}
-              <div className="bg-zinc-900/40 border border-zinc-850 rounded-none p-5 flex flex-wrap items-center justify-between gap-4">
+              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 flex flex-wrap items-center justify-between gap-4`}>
                 <div className="space-y-1 my-0.5">
-                  <h2 className="text-sm font-black uppercase text-white tracking-widest">Monitor de Pedidos Activos</h2>
-                  <p className="text-xs text-zinc-400 font-medium">Atención de comandas en tiempo real. Utiliza los controles de avance y cancelación.</p>
+                  <h2 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>Monitor de Pedidos Activos</h2>
+                  <p className={`text-xs ${classes.textMuted} font-medium`}>Atención de comandas en tiempo real. Utiliza los controles de avance y cancelación.</p>
                 </div>
                 
-                <div className="flex items-center gap-2 bg-zinc-950 px-4 py-2 border border-zinc-850 rounded-none font-mono">
+                <div className={`flex items-center gap-2 ${classes.inputBg} px-4 py-2 border ${classes.borderCard} ${classes.radiusCard} font-mono`}>
                   <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
                   <span className="text-[10px] font-black text-emerald-400 uppercase tracking-widest">En línea (SSE)</span>
                 </div>
               </div>
 
+              {/* Table Calls Notifications Section */}
+              {pendingCalls.length > 0 && (
+                <div className={`${classes.bgCard} border border-amber-500/40 p-4.5 ${classes.radiusCard} space-y-3 shadow-lg bg-amber-500/5`}>
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-xs font-black uppercase tracking-wider text-amber-500 flex items-center space-x-2">
+                      <Bell className="w-4 h-4 animate-bounce" />
+                      <span>Llamados y Solicitudes de Mesa ({pendingCalls.length})</span>
+                    </h3>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {pendingCalls.map((call) => (
+                      <div
+                        key={call.id}
+                        className={`${classes.bgApp} border ${classes.borderCard} p-3.5 ${classes.radiusCard} flex items-center justify-between gap-3 shadow-sm`}
+                      >
+                        <div className="space-y-1">
+                          <div className="flex items-center space-x-2">
+                            <span className={`px-2 py-0.5 text-[9px] font-black uppercase rounded-md font-mono ${
+                              call.type === 'waiter_call' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                            }`}>
+                              {call.type === 'waiter_call' ? '🛎️ Llamado Mozo' : '🧾 Cuenta'}
+                            </span>
+                            <span className={`text-xs font-black ${classes.textPrimary}`}>
+                              {call.tableName}
+                            </span>
+                          </div>
+                          <p className={`text-[11px] ${classes.textMuted} font-medium`}>
+                            Comensal: <span className="font-bold text-amber-500">{call.dinerName}</span>
+                          </p>
+                        </div>
+
+                        <button
+                          id={`btn-attend-call-${call.id}`}
+                          onClick={() => handleAttendCall(call.id)}
+                          className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider bg-amber-500 text-zinc-950 hover:bg-amber-400 transition cursor-pointer shrink-0 shadow"
+                        >
+                          Atender
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Grid of active orders arranged nicely */}
               {activeOrdersList.length === 0 ? (
-                <div className="text-center py-24 bg-zinc-900/30 border border-zinc-850 rounded-none p-6">
-                  <Bell className="w-10 h-10 text-zinc-700 mx-auto mb-4" />
-                  <h3 className="text-xs font-black uppercase tracking-wider text-white mb-1.5">Tranquilidad absoluta</h3>
-                  <p className="text-xs text-zinc-400 max-w-sm mx-auto leading-relaxed font-semibold">No hay pedidos pendientes para este local en este momento. Escanea un código QR como Cliente para enviar una comanda.</p>
+                <div className={`text-center py-24 ${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-6`}>
+                  <Bell className={`w-10 h-10 ${classes.textMuted} mx-auto mb-4`} />
+                  <h3 className={`text-xs font-black uppercase tracking-wider ${classes.textPrimary} mb-1.5`}>Tranquilidad absoluta</h3>
+                  <p className={`text-xs ${classes.textMuted} max-w-sm mx-auto leading-relaxed font-semibold`}>No hay pedidos pendientes para este local en este momento. Escanea un código QR como Cliente para enviar una comanda.</p>
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
@@ -957,26 +1056,44 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                         key={ord.id}
                         initial={{ opacity: 0, scale: 0.98 }}
                         animate={{ opacity: 1, scale: 1 }}
-                        className="bg-zinc-900/30 border border-zinc-850 p-4.5 rounded-none flex flex-col justify-between hover:border-zinc-750 transition"
+                        className={`${classes.bgCard} ${classes.bgCardHover} border ${classes.borderCard} p-4.5 ${classes.radiusCard} flex flex-col justify-between transition`}
                       >
                         {/* Upper Section */}
                         <div className="space-y-4">
-                          <div className="flex items-center justify-between border-b border-zinc-850 pb-3">
+                          <div className={`flex items-center justify-between border-b ${classes.borderCard} pb-3`}>
                             <div>
-                              <h4 className="font-black text-sm text-white tracking-wide uppercase">{ord.tableName}</h4>
-                              <p className="text-[10px] text-zinc-500 mt-1 flex items-center font-mono">
-                                <Clock className="w-3.5 h-3.5 mr-1 text-zinc-500" />
+                              <div className="flex items-center space-x-2">
+                                <h4 className={`font-black text-sm ${classes.textPrimary} tracking-wide uppercase`}>{ord.tableName}</h4>
+                                {ord.dinerName && (
+                                  <span className="text-[10px] font-bold text-amber-500 bg-amber-500/10 px-2 py-0.5 rounded-md border border-amber-500/20">
+                                    {ord.dinerName}
+                                  </span>
+                                )}
+                              </div>
+                              <p className={`text-[10px] ${classes.textMuted} mt-1 flex items-center font-mono`}>
+                                <Clock className={`w-3.5 h-3.5 mr-1 ${classes.textMuted}`} />
                                 Espera: {getWaitingTime(ord.createdAt)}
                               </p>
                             </div>
 
-                            <span className={`text-[9px] font-black font-mono uppercase px-2.5 py-1 rounded-none border tracking-widest flex items-center space-x-1 ${
-                              ord.status === 'Recibido' ? 'bg-amber-500/10 text-amber-500 border-amber-500/20' :
-                              ord.status === 'En preparación' ? 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20' :
-                              'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 animate-pulse'
-                            }`}>
-                              <span>{ord.status}</span>
-                            </span>
+                            <div className="flex items-center space-x-2">
+                              <span className={`text-[9px] font-black font-mono uppercase px-2.5 py-1 ${classes.radiusPill} border tracking-widest flex items-center space-x-1 ${
+                                ord.status === 'Recibido' ? 'bg-amber-500/10 text-amber-500 border-amber-500/20' :
+                                ord.status === 'En preparación' ? 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20' :
+                                'bg-emerald-500/10 text-emerald-400 border-emerald-500/20 animate-pulse'
+                              }`}>
+                                <span>{ord.status}</span>
+                              </span>
+
+                              <button
+                                id={`btn-close-table-${ord.tableId}`}
+                                onClick={() => handleCloseTableSession(ord.tableId, ord.tableName)}
+                                className={`p-1.5 text-[9px] font-black uppercase rounded-lg border ${classes.borderCard} hover:border-rose-500 text-rose-400 transition`}
+                                title={`Cerrar sesión de ${ord.tableName} manualmente`}
+                              >
+                                Cerrar Mesa
+                              </button>
+                            </div>
                           </div>
 
                           {/* Items listing */}
@@ -984,14 +1101,14 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                             {ord.items.map((i) => (
                               <div key={i.id} className="text-xs">
                                 <div className="flex items-start justify-between">
-                                  <p className="font-medium text-zinc-100">
+                                  <p className={`font-medium ${classes.textPrimary}`}>
                                     <span className="font-mono text-amber-500 font-bold mr-2">{i.quantity}x</span>
                                     {i.name}
                                   </p>
-                                  <span className="text-[10px] font-mono text-zinc-500 font-bold">{formatPrice(i.price * i.quantity)}</span>
+                                  <span className={`text-[10px] font-mono ${classes.textMuted} font-bold`}>{formatPrice(i.price * i.quantity)}</span>
                                 </div>
                                 {i.comment && (
-                                  <div className="mt-1.5 ml-6 px-2 py-1.5 border-l-2 border-amber-500 bg-amber-500/5 text-amber-400 text-[10px] font-medium leading-normal rounded-none max-w-xs truncate italic">
+                                  <div className={`mt-1.5 ml-6 px-2 py-1.5 border-l-2 border-amber-500 bg-amber-500/5 text-amber-500 text-[10px] font-medium leading-normal ${classes.radiusCard} max-w-xs truncate italic`}>
                                     "{i.comment}"
                                   </div>
                                 )}
@@ -1001,9 +1118,9 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                         </div>
 
                         {/* Lower section actions */}
-                        <div className="mt-6 border-t border-zinc-850/80 pt-4 flex items-center justify-between gap-3">
+                        <div className={`mt-6 border-t ${classes.borderCard} pt-4 flex items-center justify-between gap-3`}>
                           <div>
-                            <span className="text-[9px] text-zinc-550 font-mono uppercase tracking-widest block font-bold">Monto total</span>
+                            <span className={`text-[9px] ${classes.textMuted} font-mono uppercase tracking-widest block font-bold`}>Monto total</span>
                             <span id={`order-total-${ord.id}`} className="font-mono text-sm font-black text-amber-500">{formatPrice(totalOrderPrice)}</span>
                           </div>
 
@@ -1014,7 +1131,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                                 setSelectedOrder(ord);
                                 setIsCancelModalOpen(true);
                               }}
-                              className="px-3 py-2 rounded-none text-xs font-black uppercase tracking-widest text-rose-400 hover:bg-rose-950/20 border border-zinc-800 transition cursor-pointer"
+                              className={`px-3 py-2 ${classes.radiusBtn} text-xs font-black uppercase tracking-widest text-rose-500 hover:bg-rose-500/10 border ${classes.borderCard} transition cursor-pointer`}
                               title="Cancelar Pedido con justificación"
                             >
                               Cancelar
@@ -1023,7 +1140,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                             <button
                               id={`btn-advance-order-${ord.id}`}
                               onClick={() => handleAdvanceStatus(ord)}
-                              className="px-4 py-2 rounded-none text-xs font-black text-zinc-950 bg-white hover:bg-zinc-200 transition cursor-pointer uppercase font-mono tracking-widest"
+                              className={`px-4 py-2 ${classes.radiusBtn} text-xs font-black ${classes.textPrimary} ${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 transition cursor-pointer uppercase font-mono tracking-widest shadow-sm`}
                             >
                               {ord.status === 'Recibido' ? 'Preparar' :
                                ord.status === 'En preparación' ? 'Listo' :
@@ -1043,10 +1160,10 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
           {activeTab === 'diseño_mesas' && currentUser.role === 'admin' && (
             <div className="space-y-6">
               
-              <div className="bg-zinc-900/40 border border-zinc-850 rounded-none p-5 flex flex-wrap items-center justify-between gap-4">
+              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 flex flex-wrap items-center justify-between gap-4`}>
                 <div className="space-y-1 my-0.5">
-                  <h2 className="text-sm font-black uppercase text-white tracking-widest">Mesas e Impresión QR</h2>
-                  <p className="text-xs text-zinc-400 font-medium">Administra los códigos QR de cada mesa. Los códigos enlazan automáticamente la mesa con el pedido.</p>
+                  <h2 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>Mesas e Impresión QR</h2>
+                  <p className={`text-xs ${classes.textMuted} font-medium`}>Administra los códigos QR de cada mesa. Los códigos enlazan automáticamente la mesa con el pedido.</p>
                 </div>
 
                 <button
@@ -1055,7 +1172,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     setEditingTable({ name: '', active: true });
                     setIsTableModalOpen(true);
                   }}
-                  className="px-4.5 py-3 rounded-none text-xs font-black text-black bg-white hover:bg-zinc-200 transition flex items-center space-x-2 cursor-pointer uppercase tracking-widest"
+                  className={`px-4.5 py-3 ${classes.radiusBtn} text-xs font-black text-zinc-950 bg-amber-500 hover:bg-amber-400 transition flex items-center space-x-2 cursor-pointer uppercase tracking-widest shadow-md`}
                 >
                   <Plus className="w-4 h-4" />
                   <span>Crear Nueva Mesa</span>
@@ -1073,22 +1190,22 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     <div
                       id={`table-card-${table.id}`}
                       key={table.id}
-                      className={`bg-zinc-900/30 border ${
-                        table.active ? 'border-zinc-850' : 'border-zinc-900 opacity-40'
-                      } rounded-none p-4.5 flex flex-col justify-between`}
+                      className={`${classes.bgCard} border ${
+                        table.active ? classes.borderCard : 'border-dashed opacity-40'
+                      } ${classes.radiusCard} p-4.5 flex flex-col justify-between`}
                     >
                       <div className="space-y-3">
                         <div className="flex items-center justify-between">
-                          <h4 className="font-black text-xs text-white uppercase tracking-wider">{table.name}</h4>
-                          <span className={`text-[9px] font-mono font-black uppercase px-2 py-0.5 rounded-none border ${
-                            table.active ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-zinc-900 border-zinc-800 text-zinc-550'
+                          <h4 className={`font-black text-xs ${classes.textPrimary} uppercase tracking-wider`}>{table.name}</h4>
+                          <span className={`text-[9px] font-mono font-black uppercase px-2 py-0.5 ${classes.radiusPill} border ${
+                            table.active ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : `${classes.bgCard} ${classes.borderCard} ${classes.textMuted}`
                           }`}>
                             {table.active ? 'Activa' : 'Inactiva'}
                           </span>
                         </div>
 
                         {/* Interactive mini QR placard */}
-                        <div className="bg-white p-2 text-center rounded-none border border-zinc-800 max-w-[124px] mx-auto select-none flex flex-col items-center justify-center">
+                        <div className={`bg-white p-2 text-center ${classes.radiusCard} border ${classes.borderCard} max-w-[124px] mx-auto select-none flex flex-col items-center justify-center shadow-sm`}>
                           <img 
                             src={qrApiUrl} 
                             alt={`QR ${table.name}`} 
@@ -1097,42 +1214,55 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                           />
                         </div>
                         
-                        <p className="text-[10px] text-zinc-550 font-mono text-center select-all truncate px-1">
+                        <p className={`text-[10px] ${classes.textMuted} font-mono text-center select-all truncate px-1`}>
                           {finalClientUrl.slice(0, 30)}...
                         </p>
                       </div>
 
-                      <div className="mt-4 pt-3.5 border-t border-zinc-850/80 flex items-center justify-between gap-1">
-                        <button
-                          id={`btn-edit-table-${table.id}`}
-                          onClick={() => {
-                            setEditingTable(table);
-                            setIsTableModalOpen(true);
-                          }}
-                          className="p-2.5 rounded-none text-zinc-400 hover:text-white bg-zinc-950 border border-zinc-850 hover:bg-zinc-900 transition"
-                          title="Editar mesa"
-                        >
-                          <Edit className="w-3.5 h-3.5" />
-                        </button>
+                      <div className={`mt-4 pt-3.5 border-t ${classes.borderCard} flex items-center justify-between gap-1 flex-wrap`}>
+                        <div className="flex items-center space-x-1">
+                          <button
+                            id={`btn-edit-table-${table.id}`}
+                            onClick={() => {
+                              setEditingTable(table);
+                              setIsTableModalOpen(true);
+                            }}
+                            className={`p-2 ${classes.radiusBtn} ${classes.textMuted} hover:${classes.textPrimary} ${classes.bgCard} border ${classes.borderCard} transition`}
+                            title="Editar mesa"
+                          >
+                            <Edit className="w-3.5 h-3.5" />
+                          </button>
 
-                        <button
-                          id={`btn-delete-table-${table.id}`}
-                          onClick={() => handleDeleteTable(table.id)}
-                          className="p-2.5 rounded-none text-rose-450 hover:text-rose-400 bg-zinc-950 border border-zinc-850 hover:bg-zinc-900 transition"
-                          title="Eliminar mesa"
-                        >
-                          <Trash className="w-3.5 h-3.5" />
-                        </button>
+                          <button
+                            id={`btn-delete-table-${table.id}`}
+                            onClick={() => handleDeleteTable(table.id)}
+                            className={`p-2 ${classes.radiusBtn} text-rose-500 hover:text-rose-400 ${classes.bgCard} border ${classes.borderCard} hover:bg-rose-500/10 transition`}
+                            title="Eliminar mesa"
+                          >
+                            <Trash className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
 
-                        <button
-                          id={`btn-download-qr-${table.id}`}
-                          onClick={() => triggerQrDownload(table)}
-                          className="px-3 py-1.5 rounded-none bg-zinc-950 border border-zinc-800 hover:bg-white hover:text-black text-zinc-300 text-[10px] font-black uppercase tracking-widest transition flex items-center space-x-1.5 cursor-pointer"
-                          title="Descargar carpa de mesa tamaño grande listo para imprimir"
-                        >
-                          <Download className="w-3 h-3" />
-                          <span>Descargar Carpa</span>
-                        </button>
+                        <div className="flex items-center space-x-1">
+                          <button
+                            id={`btn-close-table-card-${table.id}`}
+                            onClick={() => handleCloseTableSession(table.id, table.name)}
+                            className={`px-2.5 py-1.5 ${classes.radiusBtn} bg-rose-500/10 border border-rose-500/30 hover:border-rose-500 text-rose-400 text-[10px] font-black uppercase tracking-wider transition cursor-pointer`}
+                            title="Cerrar la sesión de la mesa"
+                          >
+                            Cerrar Mesa
+                          </button>
+
+                          <button
+                            id={`btn-download-qr-${table.id}`}
+                            onClick={() => triggerQrDownload(table)}
+                            className={`px-2.5 py-1.5 ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 ${classes.textSecondary} hover:${classes.textPrimary} text-[10px] font-black uppercase tracking-widest transition flex items-center space-x-1 cursor-pointer`}
+                            title="Descargar carpa de mesa tamaño grande listo para imprimir"
+                          >
+                            <Download className="w-3 h-3" />
+                            <span>Carpa</span>
+                          </button>
+                        </div>
                       </div>
                     </div>
                   );
@@ -1146,10 +1276,10 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
             <div className="space-y-6">
               
               {/* Toolbar */}
-              <div className="bg-zinc-900/40 border border-zinc-850 rounded-none p-5 flex flex-wrap items-center justify-between gap-4">
+              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 flex flex-wrap items-center justify-between gap-4`}>
                 <div className="space-y-1 my-0.5">
-                  <h2 className="text-sm font-black uppercase text-white tracking-widest">Catálogo de Categorías y Platos</h2>
-                  <p className="text-xs text-zinc-400 font-medium">Sube platos, ajusta precios e inhabilita instantáneamente los insumos agotados.</p>
+                  <h2 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>Catálogo de Categorías y Platos</h2>
+                  <p className={`text-xs ${classes.textMuted} font-medium`}>Sube platos, ajusta precios e inhabilita instantáneamente los insumos agotados.</p>
                 </div>
 
                 <div className="flex items-center gap-3">
@@ -1159,9 +1289,9 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       setEditingCategory({ name: '' });
                       setIsCategoryModalOpen(true);
                     }}
-                    className="px-4.5 py-3 rounded-none text-xs font-black text-white bg-zinc-900 border border-zinc-800 hover:bg-zinc-850 transition flex items-center space-x-1.5 cursor-pointer uppercase tracking-widest"
+                    className={`px-4.5 py-3 ${classes.radiusBtn} text-xs font-black ${classes.textPrimary} ${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 transition flex items-center space-x-1.5 cursor-pointer uppercase tracking-widest`}
                   >
-                    <Layers className="w-4 h-4" />
+                    <Layers className="w-4 h-4 text-amber-500" />
                     <span>Categorías</span>
                   </button>
 
@@ -1172,7 +1302,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       setIsItemModalOpen(true);
                     }}
                     disabled={categories.length === 0}
-                    className="px-4.5 py-3 bg-white hover:bg-zinc-200 disabled:bg-zinc-900 disabled:text-zinc-700 text-black text-xs font-black rounded-none transition flex items-center space-x-2 cursor-pointer uppercase tracking-widest"
+                    className={`px-4.5 py-3 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-zinc-950 text-xs font-black ${classes.radiusBtn} transition flex items-center space-x-2 cursor-pointer uppercase tracking-widest shadow-md`}
                   >
                     <Plus className="w-4 h-4" />
                     <span>Nuevo Item</span>
@@ -1189,19 +1319,19 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     placeholder="Filtrar por nombre..."
                     value={menuSearch}
                     onChange={(e) => setMenuSearch(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-850 py-3 pl-10 pr-4 rounded-none text-xs text-white focus:outline-none focus:border-white font-medium"
+                    className={`w-full ${classes.inputBg} border ${classes.inputBorder} py-3 pl-10 pr-4 ${classes.radiusCard} text-xs ${classes.textPrimary} focus:outline-none font-medium`}
                   />
-                  <Search className="w-4 h-4 text-zinc-550 absolute left-3.5 top-3.5" />
+                  <Search className={`w-4 h-4 ${classes.textMuted} absolute left-3.5 top-3.5`} />
                 </div>
 
                 <div className="flex space-x-2 overflow-x-auto w-full sm:w-auto scrollbar-none py-1">
                   <button
                     id="filter-cat-all"
                     onClick={() => setMenuCatFilter('all')}
-                    className={`px-3.5 py-2 rounded-none text-[10px] font-black uppercase tracking-wider transition-all border ${
+                    className={`px-3.5 py-2 ${classes.radiusBtn} text-[10px] font-black uppercase tracking-wider transition-all border ${
                       menuCatFilter === 'all' 
-                        ? 'bg-white text-black border-white' 
-                        : 'bg-zinc-900 text-zinc-400 border-zinc-850 hover:border-zinc-805 hover:text-white'
+                        ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold' 
+                        : `${classes.bgCard} ${classes.textMuted} ${classes.borderCard} hover:${classes.textPrimary}`
                     }`}
                   >
                     Todos
@@ -1211,10 +1341,10 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       id={`filter-cat-${cat.id}`}
                       key={cat.id}
                       onClick={() => setMenuCatFilter(cat.id)}
-                      className={`px-3.5 py-2 rounded-none text-[10px] font-black uppercase tracking-wider transition-all border ${
+                      className={`px-3.5 py-2 ${classes.radiusBtn} text-[10px] font-black uppercase tracking-wider transition-all border ${
                         menuCatFilter === cat.id 
-                          ? 'bg-white text-black border-white' 
-                          : 'bg-zinc-900 text-zinc-400 border-zinc-850 hover:border-zinc-805 hover:text-white'
+                          ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold' 
+                          : `${classes.bgCard} ${classes.textMuted} ${classes.borderCard} hover:${classes.textPrimary}`
                       }`}
                     >
                       {cat.name}
@@ -1224,39 +1354,39 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               </div>
 
               {/* Items Table List */}
-              <div className="bg-zinc-900/35 border border-zinc-850 rounded-none overflow-hidden">
+              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} overflow-hidden`}>
                 
                 {/* Visual view of Categories manager inside panel */}
-                <div className="p-4 bg-zinc-950 border-b border-zinc-850 flex items-center justify-between flex-wrap gap-2">
-                  <span className="text-[10px] tracking-wider font-mono font-black text-zinc-450 uppercase">
+                <div className={`p-4 ${classes.bgHeader} border-b ${classes.borderCard} flex items-center justify-between flex-wrap gap-2`}>
+                  <span className={`text-[10px] tracking-wider font-mono font-black ${classes.textMuted} uppercase`}>
                     Categorías registradas del local ({categories.length})
                   </span>
                 </div>
 
                 {categories.length === 0 ? (
-                  <p className="text-xs text-zinc-500 p-4 italic text-center">Debes crear al menos una categoría primero.</p>
+                  <p className={`text-xs ${classes.textMuted} p-4 italic text-center`}>Debes crear al menos una categoría primero.</p>
                 ) : (
                   <div className="p-4 flex flex-wrap gap-2.5">
                     {categories.map(cat => (
                       <span 
                         id={`cat-badge-${cat.id}`}
                         key={cat.id} 
-                        className="bg-zinc-950 text-zinc-300 py-1.5 px-3 rounded-none text-xs font-medium border border-zinc-850 flex items-center font-mono uppercase tracking-wide"
+                        className={`${classes.inputBg} ${classes.textPrimary} py-1.5 px-3 ${classes.radiusCard} text-xs font-medium border ${classes.borderCard} flex items-center font-mono uppercase tracking-wide`}
                       >
-                        <span className="mr-2 text-zinc-500 font-bold">#{cat.order}</span>
+                        <span className="mr-2 text-amber-500 font-bold">#{cat.order}</span>
                         <span className="font-semibold">{cat.name}</span>
                         <button
                           onClick={() => {
                             setEditingCategory(cat);
                             setIsCategoryModalOpen(true);
                           }}
-                          className="ml-2.5 p-1 text-zinc-500 hover:text-white rounded-none hover:bg-zinc-900 transition"
+                          className={`ml-2.5 p-1 ${classes.textMuted} hover:${classes.textPrimary} transition`}
                         >
                           <Edit className="w-3.5 h-3.5" />
                         </button>
                         <button
                           onClick={() => handleDeleteCategory(cat.id)}
-                          className="ml-1.5 p-1 text-rose-500 hover:text-rose-400 rounded-none hover:bg-zinc-900 transition"
+                          className="ml-1.5 p-1 text-rose-500 hover:text-rose-400 transition"
                         >
                           <Trash className="w-3.5 h-3.5" />
                         </button>
@@ -1268,7 +1398,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 <div className="overflow-x-auto">
                   <table className="w-full text-left border-collapse">
                     <thead>
-                      <tr className="border-b border-zinc-850 bg-zinc-950 text-zinc-500 font-mono text-[9px] uppercase tracking-widest font-bold">
+                      <tr className={`border-b ${classes.borderCard} ${classes.bgHeader} ${classes.textMuted} font-mono text-[9px] uppercase tracking-widest font-bold`}>
                         <th className="p-4">Bocado / Detalle</th>
                         <th className="p-4">Categoría</th>
                         <th className="p-4">Monto</th>
@@ -1276,34 +1406,34 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                         <th className="p-4 text-right">Acciones</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-zinc-850 text-xs">
+                    <tbody className={`divide-y ${classes.borderCard} text-xs`}>
                       {filteredMenuItems.map((item) => {
                         const cat = categories.find(c => c.id === item.categoryId);
                         return (
-                          <tr id={`menu-item-row-${item.id}`} key={item.id} className="hover:bg-zinc-900/30">
+                          <tr id={`menu-item-row-${item.id}`} key={item.id} className={`hover:${classes.bgCardHover} transition-colors`}>
                             <td className="p-4">
                               <div className="flex items-center space-x-3">
                                 <img
                                   src={item.imageUrl}
                                   alt={item.name}
                                   referrerPolicy="no-referrer"
-                                  className="w-10 h-10 rounded-none object-cover bg-zinc-950 border border-zinc-805 shrink-0"
+                                  className={`w-10 h-10 ${classes.radiusCard} object-cover ${classes.inputBg} border ${classes.borderCard} shrink-0`}
                                   onError={(e) => {
                                     (e.target as HTMLImageElement).src = 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&q=80&w=200';
                                   }}
                                 />
                                 <div className="min-w-0 max-w-[180px] sm:max-w-xs">
-                                  <p className="font-bold text-white truncate">{item.name}</p>
-                                  <p className="text-[10px] text-zinc-550 truncate mt-0.5">{item.description}</p>
+                                  <p className={`font-bold ${classes.textPrimary} truncate`}>{item.name}</p>
+                                  <p className={`text-[10px] ${classes.textMuted} truncate mt-0.5`}>{item.description}</p>
                                 </div>
                               </div>
                             </td>
                             <td className="p-4">
-                              <span className="font-mono text-[9px] bg-zinc-950 border border-zinc-850 text-zinc-350 font-black px-2 py-0.5 rounded-none uppercase tracking-wider">
+                              <span className={`font-mono text-[9px] ${classes.inputBg} border ${classes.borderCard} ${classes.textSecondary} font-black px-2 py-0.5 ${classes.radiusPill} uppercase tracking-wider`}>
                                 {cat ? cat.name : 'Descargado'}
                               </span>
                             </td>
-                            <td className="p-4 font-mono font-bold text-zinc-300">{formatPrice(item.price)}</td>
+                            <td className={`p-4 font-mono font-bold ${classes.textPrimary}`}>{formatPrice(item.price)}</td>
                             <td className="p-4">
                               <button
                                 id={`btn-toggle-availability-${item.id}`}
@@ -1321,7 +1451,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                                     console.error(e);
                                   }
                                 }}
-                                className={`px-2 py-0.5 rounded-none text-[9px] font-black border tracking-widest uppercase cursor-pointer ${
+                                className={`px-2.5 py-1 ${classes.radiusPill} text-[9px] font-black border tracking-widest uppercase cursor-pointer ${
                                   item.available 
                                     ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' 
                                     : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
@@ -1339,14 +1469,14 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                                     setEditingItem(item);
                                     setIsItemModalOpen(true);
                                   }}
-                                  className="p-1 px-2 rounded-none hover:bg-zinc-850 text-zinc-350 hover:text-white border border-zinc-850 transition"
+                                  className={`p-1.5 px-2.5 ${classes.radiusBtn} ${classes.textMuted} hover:${classes.textPrimary} border ${classes.borderCard} transition`}
                                 >
                                   <Edit className="w-3.5 h-3.5" />
                                 </button>
                                 <button
                                   id={`btn-delete-item-${item.id}`}
                                   onClick={() => handleDeleteMenuItem(item.id)}
-                                  className="p-1 px-2 rounded-none hover:bg-zinc-850/80 text-rose-450 hover:text-rose-450 border border-zinc-850 transition"
+                                  className={`p-1.5 px-2.5 ${classes.radiusBtn} text-rose-500 hover:text-rose-400 border ${classes.borderCard} hover:bg-rose-500/10 transition`}
                                 >
                                   <Trash className="w-3.5 h-3.5" />
                                 </button>
@@ -1358,7 +1488,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
 
                       {filteredMenuItems.length === 0 && (
                         <tr>
-                          <td colSpan={5} className="py-8 text-center text-zinc-550 font-bold italic">
+                          <td colSpan={5} className={`py-8 text-center ${classes.textMuted} font-bold italic`}>
                             No se encontraron platos.
                           </td>
                         </tr>
@@ -1374,21 +1504,21 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
           {activeTab === 'historial' && (
             <div className="space-y-6">
               
-              <div className="bg-zinc-900/40 border border-zinc-850 rounded-none p-5 flex flex-wrap items-center justify-between gap-4">
+              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 flex flex-wrap items-center justify-between gap-4`}>
                 <div className="space-y-1 my-0.5">
-                  <h2 className="text-sm font-black uppercase text-white tracking-widest">Historial de Turno & Cierre</h2>
-                  <p className="text-xs text-zinc-400 font-medium">Revisa las finanzas e historial del día. En el MVP, los montos representan el total estimado de comandas entregadas.</p>
+                  <h2 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>Historial de Turno & Cierre</h2>
+                  <p className={`text-xs ${classes.textMuted} font-medium`}>Revisa las finanzas e historial del día. En el MVP, los montos representan el total estimado de comandas entregadas.</p>
                 </div>
 
-                <div className="flex flex-col bg-zinc-950 px-4 py-2 border border-zinc-850 rounded-none font-mono text-left">
-                  <span className="text-[9px] text-zinc-500 font-mono block font-black uppercase tracking-widest">Recaudación Estimada</span>
+                <div className={`flex flex-col ${classes.inputBg} px-4 py-2 border ${classes.borderCard} ${classes.radiusCard} font-mono text-left`}>
+                  <span className={`text-[9px] ${classes.textMuted} font-mono block font-black uppercase tracking-widest`}>Recaudación Estimada</span>
                   <span id="revenue-indicator" className="text-md font-black text-amber-500 mt-0.5">{formatPrice(totalDayRevenue)}</span>
                 </div>
               </div>
 
               {/* Day orders list of deliveries and cancellations */}
-              <div className="bg-zinc-900/35 border border-zinc-850 rounded-none shadow overflow-hidden">
-                <div className="p-4 bg-zinc-950 border-b border-zinc-850 flex items-center justify-between font-mono text-[9px] text-zinc-450 tracking-widest uppercase">
+              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} overflow-hidden shadow`}>
+                <div className={`p-4 ${classes.bgHeader} border-b ${classes.borderCard} flex items-center justify-between font-mono text-[9px] ${classes.textMuted} tracking-widest uppercase`}>
                   <span>PEDIDOS ARCHIVADOS ({historyOrdersList.length})</span>
                   
                   <div className="flex items-center gap-2">
@@ -1397,7 +1527,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       id="history-table-filter font-mono"
                       value={historyTableFilter}
                       onChange={(e) => setHistoryTableFilter(e.target.value)}
-                      className="bg-zinc-900 border border-zinc-800 text-[9px] px-2 py-1 rounded-none text-white focus:outline-none focus:border-white font-mono"
+                      className={`${classes.inputBg} border ${classes.inputBorder} text-[9px] px-2 py-1 ${classes.radiusCard} ${classes.textPrimary} focus:outline-none font-mono`}
                     >
                       <option value="all">Todas</option>
                       {tables.map(t => (
@@ -1407,24 +1537,24 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                   </div>
                 </div>
 
-                <div className="divide-y divide-zinc-850">
+                <div className={`divide-y ${classes.borderCard}`}>
                   {historyOrdersList.map((ord) => {
                     const ordTotal = ord.items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
                     const localTime = new Date(ord.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
                     
                     return (
-                      <div id={`history-row-${ord.id}`} key={ord.id} className="p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 hover:bg-zinc-900/10 transition">
+                      <div id={`history-row-${ord.id}`} key={ord.id} className={`p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 hover:${classes.bgCardHover} transition`}>
                         <div className="space-y-1">
                           <div className="flex items-center space-x-2">
-                            <span className="font-bold text-xs text-zinc-200">{ord.tableName}</span>
-                            <span className="text-[10px] text-zinc-550 font-mono">({localTime})</span>
+                            <span className={`font-bold text-xs ${classes.textPrimary}`}>{ord.tableName}</span>
+                            <span className={`text-[10px] ${classes.textMuted} font-mono`}>({localTime})</span>
                           </div>
-                          <div className="text-xs text-slate-400 space-y-0.5">
+                          <div className={`text-xs ${classes.textSecondary} space-y-0.5`}>
                             {ord.items.map((i, iIdx) => (
                               <div key={i.id || iIdx}>
                                 <span>{i.quantity}x {i.name}</span>
                                 {i.comment && (
-                                  <span className="text-[10px] text-amber-400 italic ml-2">("{i.comment}")</span>
+                                  <span className="text-[10px] text-amber-500 italic ml-2">("{i.comment}")</span>
                                 )}
                               </div>
                             ))}
@@ -1437,11 +1567,11 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                         </div>
 
                         <div className="flex items-center gap-3.5 self-end sm:self-auto font-mono text-xs">
-                          <span className="font-black text-zinc-200">{formatPrice(ordTotal)}</span>
-                          <span className={`px-2.5 py-1 rounded-none text-[9px] font-mono font-black uppercase border ${
+                          <span className={`font-black ${classes.textPrimary}`}>{formatPrice(ordTotal)}</span>
+                          <span className={`px-2.5 py-1 ${classes.radiusPill} text-[9px] font-mono font-black uppercase border ${
                             ord.status === 'Entregado' 
-                              ? 'bg-zinc-900 text-zinc-400 border border-zinc-805' 
-                              : 'bg-rose-950/20 text-rose-450 border border-rose-950'
+                              ? `${classes.bgCard} ${classes.textMuted} border ${classes.borderCard}` 
+                              : 'bg-rose-950/20 text-rose-400 border border-rose-950'
                           }`}>
                             {ord.status}
                           </span>
@@ -1451,7 +1581,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                   })}
 
                   {historyOrdersList.length === 0 && (
-                    <p className="text-center py-12 text-slate-500 italic text-xs leading-none">Ningún pedido cerrado aún en este turno.</p>
+                    <p className={`text-center py-12 ${classes.textMuted} italic text-xs leading-none`}>Ningún pedido cerrado aún en este turno.</p>
                   )}
                 </div>
               </div>
@@ -1470,25 +1600,25 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               animate={{ opacity: 0.5 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsCancelModalOpen(false)}
-              className="absolute inset-0 bg-black"
+              className={`absolute inset-0 ${classes.glassOverlay}`}
             />
 
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-zinc-900 border border-zinc-850 w-full max-w-md rounded-none p-6 relative font-sans"
+              className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} w-full max-w-md p-6 relative font-sans shadow-2xl`}
             >
-              <div className="flex items-center space-x-2 text-rose-450 mb-4">
+              <div className="flex items-center space-x-2 text-rose-500 mb-4">
                 <AlertTriangle className="w-5 h-5 shrink-0" />
-                <h3 className="font-black text-sm uppercase tracking-wider text-white">Cancelar Pedido de {selectedOrder.tableName}</h3>
+                <h3 className={`font-black text-sm uppercase tracking-wider ${classes.textPrimary}`}>Cancelar Pedido de {selectedOrder.tableName}</h3>
               </div>
 
-              <div className="space-y-4 text-xs text-slate-300">
+              <div className={`space-y-4 text-xs ${classes.textSecondary}`}>
                 <p>El cliente verá reflejado el estado "Cancelado" inmediatamente. Por favor especifica las razones.</p>
                 
                 <div>
-                  <label className="block text-[10px] uppercase font-mono font-bold tracking-wider text-slate-400 mb-1">
+                  <label className={`block text-[10px] uppercase font-mono font-bold tracking-wider ${classes.textMuted} mb-1`}>
                     Motivo (Opcional)
                   </label>
                   <input
@@ -1497,29 +1627,29 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     placeholder="Ej. Insumo agotado, error de caja..."
                     value={cancellationReason}
                     onChange={(e) => setCancellationReason(e.target.value)}
-                    className="w-full bg-zinc-950 border border-zinc-850 p-3 rounded-none text-xs text-white outline-none focus:border-white font-mono"
+                    className={`w-full ${classes.inputBg} border ${classes.inputBorder} p-3 ${classes.radiusCard} text-xs ${classes.textPrimary} outline-none focus:border-amber-500 font-mono`}
                   />
                 </div>
 
                 {/* RF-A07 Core feature: Disable the causing menu item instantly */}
-                <div className="bg-zinc-950 border border-zinc-850 p-3.5 rounded-none space-y-2">
+                <div className={`${classes.inputBg} border ${classes.borderCard} p-3.5 ${classes.radiusCard} space-y-2`}>
                   <div className="flex items-center space-x-1.5 text-amber-500 mb-1">
                     <CheckCircle className="w-4 h-4 shrink-0" />
                     <span className="font-semibold text-[11px]">Acción Inteligente: Deshabilitar Insumo</span>
                   </div>
-                  <p className="text-[10px] text-slate-400 leading-normal mb-2">
+                  <p className={`text-[10px] ${classes.textMuted} leading-normal mb-2`}>
                     Si el pedido fracasó porque algún plato se agotó en cocina, elígelo abajo para marcarlo automáticamente como **Agotado / Sin stock** en el menú digital.
                   </p>
 
                   <div className="space-y-1.5">
-                    <label className="flex items-center space-x-2 p-1 text-[10px] text-slate-400 font-mono font-bold uppercase tracking-wider">
+                    <label className={`flex items-center space-x-2 p-1 text-[10px] ${classes.textMuted} font-mono font-bold uppercase tracking-wider`}>
                       <span>Selecciona el plato causante:</span>
                     </label>
                     <select
                       id="cancellation-item-disabler"
                       value={disableItemOnCancelId}
                       onChange={(e) => setDisableItemOnCancelId(e.target.value)}
-                      className="w-full bg-zinc-900 border border-zinc-850 p-2 text-zinc-300 rounded-none text-xs"
+                      className={`w-full ${classes.bgCard} border ${classes.borderCard} p-2 ${classes.textPrimary} ${classes.radiusCard} text-xs`}
                     >
                       <option value="">-- No deshabilitar ningún plato --</option>
                       {selectedOrder.items.map(item => (
@@ -1532,18 +1662,18 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 </div>
               </div>
 
-              <div className="mt-6 pt-4 border-t border-zinc-850 flex items-center justify-end space-x-2.5">
+              <div className={`mt-6 pt-4 border-t ${classes.borderCard} flex items-center justify-end space-x-2.5`}>
                 <button
                   id="btn-cancel-modal-close"
                   onClick={() => setIsCancelModalOpen(false)}
-                  className="px-4 py-2.5 text-xs font-black uppercase tracking-widest text-zinc-400 hover:text-white rounded-none bg-zinc-950 border border-zinc-850 transition cursor-pointer"
+                  className={`px-4 py-2.5 text-xs font-black uppercase tracking-widest ${classes.textMuted} hover:${classes.textPrimary} ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} transition cursor-pointer`}
                 >
                   Regresar
                 </button>
                 <button
                   id="btn-confirm-cancel-order"
                   onClick={handleCancelOrder}
-                  className="px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-rose-600 hover:bg-rose-700 text-white rounded-none transition cursor-pointer"
+                  className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-rose-600 hover:bg-rose-700 text-white ${classes.radiusBtn} transition cursor-pointer shadow-md`}
                 >
                   Confirmar Cancelación
                 </button>
@@ -1562,22 +1692,22 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               animate={{ opacity: 0.5 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsCategoryModalOpen(false)}
-              className="absolute inset-0 bg-black"
+              className={`absolute inset-0 ${classes.glassOverlay}`}
             />
 
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-zinc-900 border border-zinc-850 w-full max-w-sm rounded-none p-6 relative font-sans"
+              className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} w-full max-w-sm p-6 relative font-sans shadow-2xl`}
             >
-              <h3 className="font-black text-sm uppercase tracking-wider mb-4 text-white">
+              <h3 className={`font-black text-sm uppercase tracking-wider mb-4 ${classes.textPrimary}`}>
                 {editingCategory.id ? 'Editar Categoría' : 'Nueva Categoría'}
               </h3>
 
-              <form onSubmit={handleSaveCategory} className="space-y-4 text-xs font-sans text-zinc-300">
+              <form onSubmit={handleSaveCategory} className={`space-y-4 text-xs font-sans ${classes.textSecondary}`}>
                 <div>
-                  <label className="block text-[10px] uppercase font-mono font-black tracking-widest text-zinc-400 mb-1">
+                  <label className={`block text-[10px] uppercase font-mono font-black tracking-widest ${classes.textMuted} mb-1`}>
                     Nombre de Categoría
                   </label>
                   <input
@@ -1586,13 +1716,13 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     required
                     value={editingCategory.name || ''}
                     onChange={(e) => setEditingCategory(prev => ({ ...prev, name: e.target.value }))}
-                    className="w-full bg-zinc-950 border border-zinc-850 p-3 rounded-none text-xs outline-none focus:border-white font-mono text-white"
+                    className={`w-full ${classes.inputBg} border ${classes.inputBorder} p-3 ${classes.radiusCard} text-xs outline-none focus:border-amber-500 font-mono ${classes.textPrimary}`}
                     placeholder="Ej. Postres, Vinos..."
                   />
                 </div>
 
                 <div>
-                  <label className="block text-[10px] uppercase font-mono font-black tracking-widest text-zinc-400 mb-1">
+                  <label className={`block text-[10px] uppercase font-mono font-black tracking-widest ${classes.textMuted} mb-1`}>
                     Orden de Visualización
                   </label>
                   <input
@@ -1600,24 +1730,24 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     type="number"
                     value={editingCategory.order || ''}
                     onChange={(e) => setEditingCategory(prev => ({ ...prev, order: parseInt(e.target.value) }))}
-                    className="w-full bg-zinc-950 border border-zinc-850 p-3 rounded-none text-xs outline-none focus:border-white font-mono text-white"
+                    className={`w-full ${classes.inputBg} border ${classes.inputBorder} p-3 ${classes.radiusCard} text-xs outline-none focus:border-amber-500 font-mono ${classes.textPrimary}`}
                     placeholder="Ej. 1"
                   />
                 </div>
 
-                <div className="pt-4 border-t border-zinc-850 flex items-center justify-end space-x-2.5">
+                <div className={`pt-4 border-t ${classes.borderCard} flex items-center justify-end space-x-2.5`}>
                   <button
                     id="btn-category-modal-close"
                     type="button"
                     onClick={() => setIsCategoryModalOpen(false)}
-                    className="px-4 py-2.5 text-xs font-black uppercase tracking-widest text-zinc-400 hover:text-white rounded-none bg-zinc-950 border border-zinc-850 transition cursor-pointer"
+                    className={`px-4 py-2.5 text-xs font-black uppercase tracking-widest ${classes.textMuted} hover:${classes.textPrimary} ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} transition cursor-pointer`}
                   >
                     Descartar
                   </button>
                   <button
                     id="btn-category-modal-submit"
                     type="submit"
-                    className="px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-white text-black hover:bg-zinc-200 rounded-none transition cursor-pointer"
+                    className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-amber-500 text-zinc-950 hover:bg-amber-400 ${classes.radiusBtn} transition cursor-pointer shadow-md`}
                   >
                     Guardar Categoría
                   </button>
@@ -1637,22 +1767,22 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               animate={{ opacity: 0.5 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsItemModalOpen(false)}
-              className="absolute inset-0 bg-black"
+              className={`absolute inset-0 ${classes.glassOverlay}`}
             />
 
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-zinc-900 border border-zinc-850 w-full max-w-md rounded-none p-6 relative font-sans shadow-2xl overflow-y-auto max-h-[90vh]"
+              className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} w-full max-w-md p-6 relative font-sans shadow-2xl overflow-y-auto max-h-[90vh]`}
             >
-              <h3 className="font-black text-sm uppercase tracking-wider mb-4 text-white">
+              <h3 className={`font-black text-sm uppercase tracking-wider mb-4 ${classes.textPrimary}`}>
                 {editingItem.id ? 'Editar Ítem de Menú' : 'Crear Plato / Ítem'}
               </h3>
 
-              <form onSubmit={handleSaveMenuItem} className="space-y-4 text-xs font-sans text-zinc-300">
+              <form onSubmit={handleSaveMenuItem} className={`space-y-4 text-xs font-sans ${classes.textSecondary}`}>
                 <div>
-                  <label className="block text-[10px] uppercase font-mono font-black tracking-widest text-zinc-405 mb-1">
+                  <label className={`block text-[10px] uppercase font-mono font-black tracking-widest ${classes.textMuted} mb-1`}>
                     Categoría
                   </label>
                   <select
@@ -1660,7 +1790,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     required
                     value={editingItem.categoryId || ''}
                     onChange={(e) => setEditingItem(prev => ({ ...prev, categoryId: e.target.value }))}
-                    className="w-full bg-zinc-950 border border-zinc-850 p-3 rounded-none text-xs outline-none focus:border-white text-white font-mono"
+                    className={`w-full ${classes.inputBg} border ${classes.inputBorder} p-3 ${classes.radiusCard} text-xs outline-none focus:border-amber-500 ${classes.textPrimary} font-mono`}
                   >
                     {categories.map(c => (
                       <option key={c.id} value={c.id}>{c.name}</option>
@@ -1669,7 +1799,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 </div>
 
                 <div>
-                  <label className="block text-[10px] uppercase font-mono font-black tracking-widest text-zinc-405 mb-1">
+                  <label className={`block text-[10px] uppercase font-mono font-black tracking-widest ${classes.textMuted} mb-1`}>
                     Nombre del Ítem
                   </label>
                   <input
@@ -1678,13 +1808,13 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     required
                     value={editingItem.name || ''}
                     onChange={(e) => setEditingItem(prev => ({ ...prev, name: e.target.value }))}
-                    className="w-full bg-zinc-950 border border-zinc-850 p-3 rounded-none text-xs outline-none focus:border-white text-white"
+                    className={`w-full ${classes.inputBg} border ${classes.inputBorder} p-3 ${classes.radiusCard} text-xs outline-none focus:border-amber-500 ${classes.textPrimary}`}
                     placeholder="Ej. Suprema napolitana"
                   />
                 </div>
 
                 <div>
-                  <label className="block text-[10px] uppercase font-mono font-black tracking-widest text-zinc-405 mb-1">
+                  <label className={`block text-[10px] uppercase font-mono font-black tracking-widest ${classes.textMuted} mb-1`}>
                     Descripción del Plato
                   </label>
                   <textarea
@@ -1693,14 +1823,14 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     value={editingItem.description || ''}
                     onChange={(e) => setEditingItem(prev => ({ ...prev, description: e.target.value }))}
                     rows={3}
-                    className="w-full bg-zinc-950 border border-zinc-850 p-3 rounded-none text-xs outline-none focus:border-white leading-normal text-white"
+                    className={`w-full ${classes.inputBg} border ${classes.inputBorder} p-3 ${classes.radiusCard} text-xs outline-none focus:border-amber-500 leading-normal ${classes.textPrimary}`}
                     placeholder="Detalla los ingredientes y proporciones..."
                   />
                 </div>
 
                 <div className="grid grid-cols-2 gap-4">
                   <div>
-                    <label className="block text-[10px] uppercase font-mono font-black tracking-widest text-zinc-405 mb-1">
+                    <label className={`block text-[10px] uppercase font-mono font-black tracking-widest ${classes.textMuted} mb-1`}>
                       Monto de venta ($ ARS)
                     </label>
                     <input
@@ -1709,19 +1839,19 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       required
                       value={editingItem.price || ''}
                       onChange={(e) => setEditingItem(prev => ({ ...prev, price: parseFloat(e.target.value) }))}
-                      className="w-full bg-zinc-950 border border-zinc-850 p-3 rounded-none text-xs outline-none focus:border-white font-mono text-white"
+                      className={`w-full ${classes.inputBg} border ${classes.inputBorder} p-3 ${classes.radiusCard} text-xs outline-none focus:border-amber-500 font-mono ${classes.textPrimary}`}
                     />
                   </div>
 
                   <div>
-                    <label className="block text-[10px] uppercase font-mono font-black tracking-widest text-zinc-405 mb-1">
+                    <label className={`block text-[10px] uppercase font-mono font-black tracking-widest ${classes.textMuted} mb-1`}>
                       Disponibilidad inicial
                     </label>
                     <select
                       id="selector-item-available"
                       value={editingItem.available ? 'true' : 'false'}
                       onChange={(e) => setEditingItem(prev => ({ ...prev, available: e.target.value === 'true' }))}
-                      className="w-full bg-zinc-950 border border-zinc-850 p-3 rounded-none text-xs outline-none text-white font-mono"
+                      className={`w-full ${classes.inputBg} border ${classes.inputBorder} p-3 ${classes.radiusCard} text-xs outline-none ${classes.textPrimary} font-mono`}
                     >
                       <option value="true">Disponible (En stock)</option>
                       <option value="false">Agotado (Sin stock)</option>
@@ -1730,7 +1860,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 </div>
 
                 <div>
-                  <label className="block text-[10px] uppercase font-mono font-black tracking-widest text-zinc-405 mb-1">
+                  <label className={`block text-[10px] uppercase font-mono font-black tracking-widest ${classes.textMuted} mb-1`}>
                     URL de la Imagen / Foto
                   </label>
                   <input
@@ -1738,24 +1868,24 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     type="url"
                     value={editingItem.imageUrl || ''}
                     onChange={(e) => setEditingItem(prev => ({ ...prev, imageUrl: e.target.value }))}
-                    className="w-full bg-zinc-950 border border-zinc-850 p-3 rounded-none text-xs outline-none focus:border-white font-mono text-white"
+                    className={`w-full ${classes.inputBg} border ${classes.inputBorder} p-3 ${classes.radiusCard} text-xs outline-none focus:border-amber-500 font-mono ${classes.textPrimary}`}
                     placeholder="https://images.unsplash.com/photo-..."
                   />
                 </div>
 
-                <div className="pt-4 border-t border-zinc-850 flex items-center justify-end space-x-2.5">
+                <div className={`pt-4 border-t ${classes.borderCard} flex items-center justify-end space-x-2.5`}>
                   <button
                     id="btn-item-modal-close"
                     type="button"
                     onClick={() => setIsItemModalOpen(false)}
-                    className="px-4 py-2.5 text-xs font-black uppercase tracking-widest text-zinc-404 hover:text-white rounded-none bg-zinc-950 border border-zinc-850 transition cursor-pointer"
+                    className={`px-4 py-2.5 text-xs font-black uppercase tracking-widest ${classes.textMuted} hover:${classes.textPrimary} ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} transition cursor-pointer`}
                   >
                     Descartar
                   </button>
                   <button
                     id="btn-item-modal-submit"
                     type="submit"
-                    className="px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-white text-black hover:bg-zinc-200 rounded-none transition cursor-pointer"
+                    className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-amber-500 text-zinc-950 hover:bg-amber-400 ${classes.radiusBtn} transition cursor-pointer shadow-md`}
                   >
                     Guardar Ítem
                   </button>
@@ -1775,22 +1905,22 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               animate={{ opacity: 0.5 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsTableModalOpen(false)}
-              className="absolute inset-0 bg-black"
+              className={`absolute inset-0 ${classes.glassOverlay}`}
             />
 
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-zinc-900 border border-zinc-850 w-full max-w-sm rounded-none p-6 relative font-sans shadow-2xl"
+              className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} w-full max-w-sm p-6 relative font-sans shadow-2xl`}
             >
-              <h3 className="font-black text-sm uppercase tracking-wider mb-4 text-white">
+              <h3 className={`font-black text-sm uppercase tracking-wider mb-4 ${classes.textPrimary}`}>
                 {editingTable.id ? 'Editar Mesa' : 'Nueva Mesa QR'}
               </h3>
 
-              <form onSubmit={handleSaveTable} className="space-y-4 text-xs font-sans text-zinc-300">
+              <form onSubmit={handleSaveTable} className={`space-y-4 text-xs font-sans ${classes.textSecondary}`}>
                 <div>
-                  <label className="block text-[10px] uppercase font-mono font-black tracking-widest text-zinc-400 mb-1">
+                  <label className={`block text-[10px] uppercase font-mono font-black tracking-widest ${classes.textMuted} mb-1`}>
                     Identificador / Nombre de la Mesa
                   </label>
                   <input
@@ -1799,39 +1929,39 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     required
                     value={editingTable.name || ''}
                     onChange={(e) => setEditingTable(prev => ({ ...prev, name: e.target.value }))}
-                    className="w-full bg-zinc-950 border border-zinc-850 p-3 rounded-none text-xs outline-none focus:border-white text-white"
+                    className={`w-full ${classes.inputBg} border ${classes.inputBorder} p-3 ${classes.radiusCard} text-xs outline-none focus:border-amber-500 ${classes.textPrimary}`}
                     placeholder="Ej. Mesa 14, Comedor Familiar..."
                   />
                 </div>
 
                 <div>
-                  <label className="block text-[10px] uppercase font-mono font-black tracking-widest text-zinc-400 mb-1">
+                  <label className={`block text-[10px] uppercase font-mono font-black tracking-widest ${classes.textMuted} mb-1`}>
                     Estado Operativo
                   </label>
                   <select
                     id="selector-table-active"
                     value={editingTable.active ? 'true' : 'false'}
                     onChange={(e) => setEditingTable(prev => ({ ...prev, active: e.target.value === 'true' }))}
-                    className="w-full bg-zinc-950 border border-zinc-850 p-3 rounded-none text-xs outline-none text-white font-mono"
+                    className={`w-full ${classes.inputBg} border ${classes.inputBorder} p-3 ${classes.radiusCard} text-xs outline-none ${classes.textPrimary} font-mono`}
                   >
                     <option value="true">Activa (Acepta comensales y pedidos)</option>
                     <option value="false">Inactiva (Fuera de servicio / Bloqueada)</option>
                   </select>
                 </div>
 
-                <div className="pt-4 border-t border-zinc-850 flex items-center justify-end space-x-2.5">
+                <div className={`pt-4 border-t ${classes.borderCard} flex items-center justify-end space-x-2.5`}>
                   <button
                     id="btn-table-modal-close"
                     type="button"
                     onClick={() => setIsTableModalOpen(false)}
-                    className="px-4 py-2.5 text-xs font-black uppercase tracking-widest text-zinc-400 hover:text-white rounded-none bg-zinc-950 border border-zinc-850 transition cursor-pointer"
+                    className={`px-4 py-2.5 text-xs font-black uppercase tracking-widest ${classes.textMuted} hover:${classes.textPrimary} ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} transition cursor-pointer`}
                   >
                     Descartar
                   </button>
                   <button
                     id="btn-table-modal-submit"
                     type="submit"
-                    className="px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-white text-black hover:bg-zinc-200 rounded-none transition cursor-pointer"
+                    className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-amber-500 text-zinc-950 hover:bg-amber-400 ${classes.radiusBtn} transition cursor-pointer shadow-md`}
                   >
                     Guardar Mesa
                   </button>

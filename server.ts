@@ -22,6 +22,8 @@ import {
   saveMenuItemSchema,
   saveCategorySchema,
   saveTableSchema,
+  createTableCallSchema,
+  updateTableCallSchema,
 } from './src/server/schemas';
 
 const SESSION_TTL_SECONDS = 8 * 60 * 60; // 8 hours
@@ -272,6 +274,7 @@ async function startServer() {
       const result: CreateOrderResult = await store.createOrder({
         establishmentId: req.params.id,
         tableId: body.tableId,
+        dinerName: body.dinerName,
         items: body.items,
       });
 
@@ -284,6 +287,74 @@ async function startServer() {
       return res
         .status(409)
         .json({ error: 'Algunos ítems no están disponibles', unavailableItems: result.unavailableItems ?? [] });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // Table Calls & Notifications (public — diner via QR)
+  app.post('/api/establishments/:id/calls', async (req, res, next) => {
+    try {
+      const body = parseBody(createTableCallSchema, req, res);
+      if (!body) return;
+
+      const call = await store.createTableCall({
+        establishmentId: req.params.id,
+        tableId: body.tableId,
+        dinerName: body.dinerName,
+        type: body.type,
+      });
+
+      if (!call) return res.status(400).json({ error: 'Mesa inválida' });
+      res.status(201).json(call);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // Get session status for a table (public — diner checking if admin closed table)
+  app.get('/api/establishments/:id/tables/:tableId/session', (req, res, next) => {
+    try {
+      const session = store.getTableSessionStatus(req.params.id, req.params.tableId);
+      res.json(session);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // Get table calls for authenticated staff
+  app.get('/api/my/calls', requireAuth, (req, res, next) => {
+    try {
+      res.json(store.getTableCalls(req.user!.establishmentId));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // Mark table call as attended
+  app.patch('/api/calls/:id', requireAuth, async (req, res, next) => {
+    try {
+      const body = parseBody(updateTableCallSchema, req, res);
+      if (!body) return;
+
+      const updated = await store.updateTableCallStatus(
+        req.params.id,
+        req.user!.establishmentId,
+        body.status
+      );
+
+      if (!updated) return res.status(404).json({ error: 'Llamado no encontrado' });
+      res.json(updated);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // Close table session manually (Admin / Waiter)
+  app.post('/api/tables/:id/close', requireAuth, async (req, res, next) => {
+    try {
+      const result = await store.closeTableSession(req.user!.establishmentId, req.params.id);
+      res.json(result);
     } catch (e) {
       next(e);
     }

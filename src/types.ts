@@ -48,12 +48,24 @@ export interface Order {
   establishmentId: string;
   tableId: string;
   tableName: string;
+  dinerName?: string;
   items: OrderItem[];
   status: OrderStatus;
   cancellationReason?: string;
   createdAt: string;
   updatedAt: string;
   paymentStatus: 'pending' | 'paid' | null; // Placeholder for v1.1 roadmap
+}
+
+export interface TableCall {
+  id: string;
+  establishmentId: string;
+  tableId: string;
+  tableName: string;
+  dinerName?: string;
+  type: 'waiter_call' | 'bill_request';
+  status: 'pending' | 'attended';
+  createdAt: string;
 }
 
 export type UserRole = 'admin' | 'waiter';

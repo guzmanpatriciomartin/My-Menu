@@ -16,7 +16,12 @@ import {
   AlertTriangle,
   RotateCcw,
   Globe,
-  Palette
+  Palette,
+  Utensils,
+  Bell,
+  User,
+  Receipt,
+  FileText
 } from 'lucide-react';
 import { Establishment, Category, MenuItem, Table, Order, OrderItem, OrderStatus } from '../types';
 import { useTheme } from '../theme/ThemeContext';
@@ -75,6 +80,8 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
       backToLaucher: 'Volver al Inicio',
       historyTitle: 'Historial de Sesión',
       reason: 'Motivo:',
+      clearSession: 'Limpiar sesión / Nueva mesa',
+      clearSessionConfirm: '¿Deseas borrar el historial de pedidos anteriores para esta mesa?',
       statusRecibido: 'Recibido',
       statusPreparacion: 'En preparación',
       statusListo: 'Listo para retirar',
@@ -111,6 +118,8 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
       backToLaucher: 'Back to Demo Launcher',
       historyTitle: 'Session History',
       reason: 'Reason:',
+      clearSession: 'Clear session / New table',
+      clearSessionConfirm: 'Do you want to clear previous orders history for this table?',
       statusRecibido: 'Received',
       statusPreparacion: 'In preparation',
       statusListo: 'Ready for pick-up',
@@ -122,6 +131,17 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
     }
   }[lang];
 
+  // Check if accessed via QR URL or QR scanner session
+  const isQrAccess = useMemo(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      const params = new URLSearchParams(window.location.search);
+      return !!(params.get('establishment') || params.get('table'));
+    } catch {
+      return false;
+    }
+  }, []);
+
   // Data states
   const [establishment, setEstablishment] = useState<Establishment | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -129,6 +149,26 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
   const [tables, setTables] = useState<Table[]>([]);
   const [loading, setLoading] = useState(true);
   
+  // Diner name session state
+  const [dinerName, setDinerName] = useState<string>(() => {
+    try {
+      return localStorage.getItem(`mimenu_diner_${establishmentId}_${tableId}`) || '';
+    } catch {
+      return '';
+    }
+  });
+  const [nameInput, setNameInput] = useState<string>('');
+  const [isWelcomeModalOpen, setIsWelcomeModalOpen] = useState<boolean>(() => {
+    try {
+      return !localStorage.getItem(`mimenu_diner_${establishmentId}_${tableId}`);
+    } catch {
+      return true;
+    }
+  });
+  const [sessionEnded, setSessionEnded] = useState<boolean>(false);
+  const [callSending, setCallSending] = useState<boolean>(false);
+  const [callNotice, setCallNotice] = useState<string | null>(null);
+
   // Interaction states
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -139,6 +179,18 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
   // Notification states
   const [addedItemName, setAddedItemName] = useState<string | null>(null);
   const [tipDismissed, setTipDismissed] = useState(false);
+  const [waiterCallCooldown, setWaiterCallCooldown] = useState(0);
+  const [billRequestCooldown, setBillRequestCooldown] = useState(0);
+
+  // Cooldown countdown effect
+  useEffect(() => {
+    if (waiterCallCooldown <= 0 && billRequestCooldown <= 0) return;
+    const timer = setInterval(() => {
+      setWaiterCallCooldown(prev => Math.max(0, prev - 1));
+      setBillRequestCooldown(prev => Math.max(0, prev - 1));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [waiterCallCooldown, billRequestCooldown]);
 
   // Persistence of submitted orders (Session based, RF-C10)
   const [sessionOrderIds, setSessionOrderIds] = useState<string[]>(() => {
@@ -259,6 +311,8 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
             fetch(`/api/establishments/${establishmentId}/menu-items`)
               .then(r => r.json())
               .then(items => setMenuItems(items));
+          } else if (msg.type === 'TABLE_SESSION_CLOSED' && msg.payload.establishmentId === establishmentId) {
+            handleEndClientSession();
           }
         } catch (e) {
           // ignore parsing errors
@@ -302,7 +356,7 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
 
   // Cart operations
   const addToCart = (product: MenuItem) => {
-    if (!product.available) return; // Agotado blocker (RF-C03)
+    if (product.available === false) return; // Agotado blocker (RF-C03)
 
     setCart(prev => {
       const exists = prev.find(item => item.item.id === product.id);
@@ -348,9 +402,74 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
     return cart.reduce((sum, item) => sum + item.quantity, 0);
   }, [cart]);
 
+  // Wipe client session and show completion screen when table is closed by admin
+  const handleEndClientSession = () => {
+    try {
+      localStorage.removeItem(`mimenu_orders_${establishmentId}_${tableId}`);
+      localStorage.removeItem(`mimenu_diner_${establishmentId}_${tableId}`);
+    } catch (err) {}
+    setSessionOrderIds([]);
+    setActiveOrders([]);
+    setCart([]);
+    setDinerName('');
+    setNameInput('');
+    setSessionEnded(true);
+  };
+
+  // Check if table session was closed by admin (polling check)
+  useEffect(() => {
+    const checkSessionStatus = async () => {
+      try {
+        const res = await fetch(`/api/establishments/${establishmentId}/tables/${tableId}/session`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.closedAt) {
+            handleEndClientSession();
+          }
+        }
+      } catch (e) {
+        // ignore network error during polling
+      }
+    };
+
+    const interval = setInterval(checkSessionStatus, 4000);
+    return () => clearInterval(interval);
+  }, [establishmentId, tableId]);
+
+  // Send table call to waiter / request bill
+  const handleSendTableCall = async (type: 'waiter_call' | 'bill_request') => {
+    if (callSending) return;
+    if (type === 'waiter_call' && waiterCallCooldown > 0) return;
+    if (type === 'bill_request' && billRequestCooldown > 0) return;
+
+    setCallSending(true);
+    try {
+      const res = await fetch(`/api/establishments/${establishmentId}/calls`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tableId,
+          dinerName: dinerName || 'Mesa',
+          type,
+        }),
+      });
+      if (res.ok) {
+        if (type === 'waiter_call') setWaiterCallCooldown(30);
+        if (type === 'bill_request') setBillRequestCooldown(30);
+        const msg = type === 'waiter_call' ? '🛎️ ¡Se ha notificado al mozo!' : '🧾 ¡Se ha solicitado la cuenta!';
+        setCallNotice(msg);
+        setTimeout(() => setCallNotice(null), 3500);
+      }
+    } catch (err) {
+      console.error('Error sending call', err);
+    } finally {
+      setCallSending(false);
+    }
+  };
+
   // Submit actual order to server (RF-C07)
   const submitOrder = async () => {
-    if (cart.length === 0) return;
+    if (cart.length === 0 || orderSubmitting) return;
     setOrderSubmitting(true);
 
     try {
@@ -368,7 +487,11 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({ tableId, items })
+        body: JSON.stringify({
+          tableId,
+          dinerName: dinerName || nameInput || 'Comensal',
+          items
+        })
       });
 
       if (res.status === 409) {
@@ -382,10 +505,16 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
       if (!res.ok) throw new Error('Failed to create order');
       const orderObj: Order = await res.json();
 
+      // Clear local cart immediately to prevent re-submitting old items
+      setCart([]);
+      setIsCartOpen(false);
+
       // Store in session list
       const updatedSessions = Array.from(new Set([...sessionOrderIds, orderObj.id]));
       setSessionOrderIds(updatedSessions);
-      localStorage.setItem(`mimenu_orders_${establishmentId}_${tableId}`, JSON.stringify(updatedSessions));
+      try {
+        localStorage.setItem(`mimenu_orders_${establishmentId}_${tableId}`, JSON.stringify(updatedSessions));
+      } catch (err) {}
 
       // Immediately display order in Active Table Orders UI
       setActiveOrders(prev => {
@@ -394,10 +523,6 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
         prev.forEach(o => map.set(o.id, o));
         return Array.from(map.values()).sort((a,b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
       });
-
-      // Reset local cart and close
-      setCart([]);
-      setIsCartOpen(false);
 
       // Trigger temporary success screen
       setShowSuccessBadge(true);
@@ -480,14 +605,20 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
       {/* Static Header Section */}
       <header className={`${classes.bgHeader} ${classes.blurClass} sticky top-0 z-30 transition-all`}>
         <div className="max-w-xl mx-auto px-4 py-3.5 flex items-center justify-between">
-          <button 
-            id="btn-back-to-launcher"
-            onClick={onBackToLauncher}
-            className={`p-2 ${classes.textMuted} hover:${classes.textPrimary} transition ${classes.radiusBtn} flex items-center justify-center`}
-            title={t.backToLaucher}
-          >
-            <ArrowLeft className="w-5 h-5" />
-          </button>
+          {!isQrAccess ? (
+            <button 
+              id="btn-back-to-launcher"
+              onClick={onBackToLauncher}
+              className={`p-2 ${classes.textMuted} hover:${classes.textPrimary} transition ${classes.radiusBtn} flex items-center justify-center`}
+              title={t.backToLaucher}
+            >
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+          ) : (
+            <div className={`p-2 ${classes.textMuted} flex items-center justify-center`}>
+              <Utensils className="w-5 h-5 text-amber-500" />
+            </div>
+          )}
           
           <div className="text-center flex-1 mx-2">
             <h1 className={`font-sans font-black text-lg tracking-tight uppercase line-clamp-1 ${classes.textPrimary}`}>
@@ -515,10 +646,57 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
 
       <main className="max-w-xl mx-auto px-4 mt-5 space-y-6">
         
-        {/* Banner with Restaurant Details */}
-        <div className={`${classes.bgCard} ${classes.radiusCard} p-5 border ${classes.borderCard}`}>
+        {/* Banner with Restaurant Details & Call Actions */}
+        <div className={`${classes.bgCard} ${classes.radiusCard} p-5 border ${classes.borderCard} space-y-4`}>
           <p className={`text-xs ${classes.textSecondary} leading-relaxed font-medium italic`}>{establishment?.description}</p>
+          
+          <div className={`pt-3 border-t ${classes.borderDivider} flex items-center justify-between gap-2`}>
+            <div className="flex items-center space-x-2">
+              <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
+              <span className={`text-xs font-black uppercase tracking-wide ${classes.textPrimary}`}>
+                {dinerName ? `Hola, ${dinerName}` : tableName}
+              </span>
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <button
+                id="btn-call-waiter"
+                onClick={() => handleSendTableCall('waiter_call')}
+                disabled={callSending || waiterCallCooldown > 0}
+                className={`px-3 py-1.5 rounded-xl border ${classes.borderCard} ${classes.bgApp} hover:border-amber-500 text-[10px] font-black uppercase tracking-wider ${classes.textPrimary} flex items-center space-x-1.5 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed`}
+                title={waiterCallCooldown > 0 ? `Llamado enviado (${waiterCallCooldown}s)` : 'Llamar al mozo a la mesa'}
+              >
+                <Bell className={`w-3.5 h-3.5 ${waiterCallCooldown > 0 ? 'text-amber-400 animate-pulse' : 'text-amber-500'}`} />
+                <span>{waiterCallCooldown > 0 ? `Mozo (${waiterCallCooldown}s)` : 'Mozo'}</span>
+              </button>
+
+              <button
+                id="btn-request-bill"
+                onClick={() => handleSendTableCall('bill_request')}
+                disabled={callSending || billRequestCooldown > 0}
+                className={`px-3 py-1.5 rounded-xl border ${classes.borderCard} ${classes.bgApp} hover:border-emerald-500 text-[10px] font-black uppercase tracking-wider ${classes.textPrimary} flex items-center space-x-1.5 transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed`}
+                title={billRequestCooldown > 0 ? `Solicitud enviada (${billRequestCooldown}s)` : 'Pedir la cuenta de la mesa'}
+              >
+                <ShoppingBag className={`w-3.5 h-3.5 ${billRequestCooldown > 0 ? 'text-emerald-400 animate-pulse' : 'text-emerald-500'}`} />
+                <span>{billRequestCooldown > 0 ? `Cuenta pedida (${billRequestCooldown}s)` : 'Pedir Cuenta'}</span>
+              </button>
+            </div>
+          </div>
         </div>
+
+        {/* Call Toast Notification */}
+        <AnimatePresence>
+          {callNotice && (
+            <motion.div
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="fixed top-16 left-4 right-4 z-40 bg-amber-500 text-zinc-950 font-black text-xs px-4 py-3 rounded-xl text-center shadow-xl uppercase tracking-wider border border-amber-400"
+            >
+              {callNotice}
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Dynamic Prominent Tip Banner (RF-C04) — Notice about Custom Notes */}
         {!tipDismissed && (
@@ -550,9 +728,11 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
                 <Clock className="w-3.5 h-3.5 mr-2 animate-pulse text-amber-500" />
                 {t.activeOrders}
               </h3>
-              <span className={`text-[9px] ${classes.badgeMuted} ${classes.radiusPill} px-2.5 py-0.5 font-mono font-bold tracking-wider uppercase`}>
-                {activeOrders.length} {activeOrders.length === 1 ? 'pedido' : 'pedidos'}
-              </span>
+              <div className="flex items-center space-x-2">
+                <span className={`text-[9px] ${classes.badgeMuted} ${classes.radiusPill} px-2.5 py-0.5 font-mono font-bold tracking-wider uppercase`}>
+                  {activeOrders.length} {activeOrders.length === 1 ? 'pedido' : 'pedidos'}
+                </span>
+              </div>
             </div>
 
             <div className={`space-y-4 divide-y ${classes.borderDivider}`}>
@@ -563,22 +743,43 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
                     <div className="flex items-start justify-between">
                       <div>
                         <div className="flex items-center space-x-2">
-                          <p className={`text-xs font-mono font-bold ${classes.textSecondary}`}>{t.orderId}{ord.id.slice(-4)}</p>
+                          <p className={`text-xs font-mono font-bold ${classes.textSecondary}`}>
+                            {ord.dinerName ? `${ord.dinerName} (${ord.id.slice(-4)})` : `${t.orderId}${ord.id.slice(-4)}`}
+                          </p>
                           <span className={`text-[10px] ${classes.textMuted} font-mono`}>({timeStr})</span>
                         </div>
-                        <div className="mt-1 space-y-1">
-                          {ord.items.map((i, iIdx) => (
-                            <div key={i.id || iIdx}>
-                              <p className={`text-[11px] ${classes.textMuted}`}>
-                                <span className="font-bold">{i.quantity}x</span> {i.name}
-                              </p>
-                              {i.comment && (
-                                <p className="text-[10px] text-amber-500 italic pl-2.5 border-l-2 border-amber-500/50 mt-0.5">
-                                  "{i.comment}"
-                                </p>
-                              )}
-                            </div>
-                          ))}
+                        <div className="mt-1 space-y-1.5">
+                          {ord.items.map((i, iIdx) => {
+                            const matched = menuItems.find(m => m.id === i.menuItemId);
+                            return (
+                              <div key={i.id || iIdx} className="flex items-center justify-between space-x-2">
+                                <div>
+                                  <p className={`text-[11px] ${classes.textMuted}`}>
+                                    <span className="font-bold">{i.quantity}x</span> {i.name}
+                                  </p>
+                                  {i.comment && (
+                                    <p className="text-[10px] text-amber-500 italic pl-2.5 border-l-2 border-amber-500/50 mt-0.5">
+                                      "{i.comment}"
+                                    </p>
+                                  )}
+                                </div>
+                                {matched && matched.available !== false && (
+                                  <button
+                                    id={`btn-reorder-item-${matched.id}`}
+                                    onClick={() => {
+                                      addToCart(matched);
+                                      setIsCartOpen(true);
+                                    }}
+                                    className={`px-2 py-0.5 text-[9px] font-black uppercase tracking-wider ${classes.secondaryBtn} ${classes.radiusBtn} border border-amber-500/30 text-amber-500 flex items-center space-x-1 hover:bg-amber-500/10 transition shrink-0 cursor-pointer`}
+                                    title="Sumar 1 más al carrito"
+                                  >
+                                    <Plus className="w-2.5 h-2.5" />
+                                    <span>Sumar</span>
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                       <span className={`text-[9px] uppercase font-black px-2.5 py-0.5 ${classes.radiusPill} border flex items-center space-x-1 ${getStatusColor(ord.status)}`}>
@@ -685,7 +886,7 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.98 }}
                 className={`${classes.bgCard} ${classes.borderCard} ${classes.radiusCard} ${classes.bgCardHover} p-4 flex items-start space-x-5 transition-all relative ${
-                  !item.available ? 'opacity-40' : ''
+                  item.available === false ? 'opacity-40' : ''
                 }`}
               >
                 {/* Photo or Premium Placeholder */}
@@ -699,7 +900,7 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
                       (e.target as HTMLImageElement).src = 'https://images.unsplash.com/photo-1546069901-ba9599a7e63c?auto=format&fit=crop&q=80&w=200';
                     }}
                   />
-                  {!item.available && (
+                  {item.available === false && (
                     <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
                       <span className="text-[9px] font-black text-white uppercase tracking-wider font-mono px-2 py-0.5 border border-white/35 bg-black/80">
                         {t.soldOut}
@@ -724,7 +925,7 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
                       {formatPrice(item.price)}
                     </span>
 
-                    {item.available ? (
+                    {item.available !== false ? (
                       <button
                         id={`btn-add-item-${item.id}`}
                         onClick={() => addToCart(item)}
@@ -952,6 +1153,113 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
               )}
             </motion.div>
           </>
+        )}
+      </AnimatePresence>
+
+      {/* Welcome Name Prompt Modal */}
+      <AnimatePresence>
+        {isWelcomeModalOpen && !sessionEnded && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 font-sans"
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-6 max-w-sm w-full space-y-5 text-center shadow-2xl`}
+            >
+              <div className="w-12 h-12 bg-amber-500/10 text-amber-500 rounded-full flex items-center justify-center mx-auto border border-amber-500/20">
+                <Utensils className="w-6 h-6" />
+              </div>
+              
+              <div>
+                <h3 className={`text-base font-black uppercase tracking-wider ${classes.textPrimary}`}>
+                  ¡Bienvenido/a a {establishment?.name}!
+                </h3>
+                <p className={`text-xs ${classes.textMuted} mt-1 font-mono uppercase font-bold text-amber-500`}>
+                  {tableName}
+                </p>
+                <p className={`text-xs ${classes.textSecondary} mt-2 font-medium leading-relaxed`}>
+                  Por favor, decinos tu nombre para identificar tus pedidos en la mesa:
+                </p>
+              </div>
+
+              <form onSubmit={(e) => {
+                e.preventDefault();
+                const trimmed = nameInput.trim();
+                if (!trimmed) return;
+                setDinerName(trimmed);
+                try {
+                  localStorage.setItem(`mimenu_diner_${establishmentId}_${tableId}`, trimmed);
+                } catch (err) {}
+                setIsWelcomeModalOpen(false);
+              }} className="space-y-4">
+                <input
+                  id="input-diner-name"
+                  type="text"
+                  required
+                  placeholder="Ej: Juan / María"
+                  value={nameInput}
+                  onChange={(e) => setNameInput(e.target.value)}
+                  className={`w-full px-4 py-3 text-sm rounded-xl border ${classes.borderCard} ${classes.bgApp} ${classes.textPrimary} focus:outline-none focus:border-amber-500 transition text-center font-bold`}
+                  autoFocus
+                />
+
+                <button
+                  id="btn-confirm-diner-name"
+                  type="submit"
+                  className="w-full py-3.5 px-4 rounded-xl text-xs font-black uppercase tracking-widest bg-amber-500 text-zinc-950 hover:bg-amber-400 transition cursor-pointer shadow-lg"
+                >
+                  Ver Menú y Pedir
+                </button>
+              </form>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Session Ended Overlay (when closed manually by admin) */}
+      <AnimatePresence>
+        {sessionEnded && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4 text-center font-sans"
+          >
+            <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-6 max-w-sm w-full space-y-5 shadow-2xl`}>
+              <div className="w-14 h-14 bg-emerald-500/10 text-emerald-400 rounded-full flex items-center justify-center mx-auto border border-emerald-500/20">
+                <CheckCircle className="w-8 h-8" />
+              </div>
+
+              <div className="space-y-2">
+                <h3 className={`text-base font-black uppercase tracking-wider ${classes.textPrimary}`}>
+                  ¡Muchas Gracias por tu Visita!
+                </h3>
+                <p className={`text-xs ${classes.textMuted} font-mono font-bold uppercase text-amber-500`}>
+                  {tableName}
+                </p>
+                <p className={`text-xs ${classes.textSecondary} leading-relaxed`}>
+                  La mesa ha sido cerrada por el personal. Se guardaron los datos de tu pedido y la sesión fue finalizada.
+                </p>
+              </div>
+
+              <button
+                id="btn-restart-client-session"
+                onClick={() => {
+                  setSessionEnded(false);
+                  setDinerName('');
+                  setNameInput('');
+                  setIsWelcomeModalOpen(true);
+                }}
+                className="w-full py-3.5 px-4 rounded-xl text-xs font-black uppercase tracking-widest bg-amber-500 text-zinc-950 hover:bg-amber-400 transition cursor-pointer shadow-lg"
+              >
+                Iniciar Nueva Sesión
+              </button>
+            </div>
+          </motion.div>
         )}
       </AnimatePresence>
     </div>
