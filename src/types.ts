@@ -48,6 +48,8 @@ export interface Order {
   establishmentId: string;
   tableId: string;
   tableName: string;
+  // Name the diner gave when starting the session. Optional: orders placed before the
+  // welcome prompt existed do not carry one.
   dinerName?: string;
   items: OrderItem[];
   status: OrderStatus;

@@ -149,11 +149,10 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
   const [tables, setTables] = useState<Table[]>([]);
   const [loading, setLoading] = useState(true);
   
-  // When the current sitting started. Compared against the table's closedAt so a past
-  // close does not terminate the session of the next diner.
-  const sessionStartKey = `mimenu_session_start_${establishmentId}_${tableId}`;
-
   // Diner name session state
+  const sessionStartedAtRef = React.useRef<number>(Date.now());
+  const handledClosedAtRef = React.useRef<string | null>(null);
+
   const [dinerName, setDinerName] = useState<string>(() => {
     try {
       return localStorage.getItem(`mimenu_diner_${establishmentId}_${tableId}`) || '';
@@ -316,7 +315,13 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
               .then(r => r.json())
               .then(items => setMenuItems(items));
           } else if (msg.type === 'TABLE_SESSION_CLOSED' && msg.payload.establishmentId === establishmentId) {
-            handleEndClientSession();
+            if (!msg.payload.tableId || msg.payload.tableId === tableId) {
+              const closedAt = msg.payload.closedAt || new Date().toISOString();
+              const closedAtMs = new Date(closedAt).getTime();
+              if (closedAtMs >= sessionStartedAtRef.current - 2000 && handledClosedAtRef.current !== closedAt) {
+                handleEndClientSession(closedAt);
+              }
+            }
           }
         } catch (e) {
           // ignore parsing errors
@@ -407,13 +412,14 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
   }, [cart]);
 
   // Wipe client session and show completion screen when table is closed by admin
-  const handleEndClientSession = () => {
+  const handleEndClientSession = (closedAtTimestamp?: string) => {
+    if (closedAtTimestamp) {
+      if (handledClosedAtRef.current === closedAtTimestamp) return;
+      handledClosedAtRef.current = closedAtTimestamp;
+    }
     try {
       localStorage.removeItem(`mimenu_orders_${establishmentId}_${tableId}`);
       localStorage.removeItem(`mimenu_diner_${establishmentId}_${tableId}`);
-      // Dropped too, so the next diner stamps a fresh start instead of inheriting one
-      // older than the close that just happened.
-      localStorage.removeItem(sessionStartKey);
     } catch (err) {}
     setSessionOrderIds([]);
     setActiveOrders([]);
@@ -423,59 +429,45 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
     setSessionEnded(true);
   };
 
-  // Check if the table was closed by the staff (polling).
-  //
-  // The server remembers the LAST closedAt of a table indefinitely, so "closedAt exists"
-  // is not enough to end a session: after a close, the next diner would be wiped and
-  // re-prompted for their name every poll. We only end the session when the table was
-  // closed AFTER this sitting started.
-  useEffect(() => {
-    if (sessionEnded) return; // already finished — nothing left to wipe
+  // Reset/Start a new session on the table
+  const handleRestartSession = async () => {
+    sessionStartedAtRef.current = Date.now();
+    handledClosedAtRef.current = null;
+    try {
+      await fetch(`/api/establishments/${establishmentId}/tables/${tableId}/session`, {
+        method: 'DELETE',
+      });
+    } catch (err) {}
+    setSessionEnded(false);
+    setDinerName('');
+    setNameInput('');
+    setIsWelcomeModalOpen(true);
+  };
 
+  // Check if table session was closed by admin (polling check)
+  useEffect(() => {
     const checkSessionStatus = async () => {
       try {
         const res = await fetch(`/api/establishments/${establishmentId}/tables/${tableId}/session`);
-        if (!res.ok) return;
-        const data = await res.json();
-        if (!data.closedAt) return;
-
-        const startedAt = (() => {
-          try {
-            return localStorage.getItem(sessionStartKey);
-          } catch {
-            return null;
+        if (res.ok) {
+          const data = await res.json();
+          if (data.closedAt) {
+            const closedAtMs = new Date(data.closedAt).getTime();
+            // Only trigger closure if closedAt occurred AFTER this client session started
+            // and hasn't been handled yet for this closedAt timestamp
+            if (closedAtMs >= sessionStartedAtRef.current - 2000 && handledClosedAtRef.current !== data.closedAt) {
+              handleEndClientSession(data.closedAt);
+            }
           }
-        })();
-
-        // No stamp: a session that predates this stamping logic. If it still holds data,
-        // that data belongs to whoever sat here before the table was closed, so wipe it
-        // once. This does not loop — the wipe stops the poll, and entering a name writes
-        // a fresh stamp. With nothing to wipe we just stamp and carry on.
-        if (!startedAt) {
-          if (dinerName || sessionOrderIds.length > 0) {
-            handleEndClientSession();
-          } else {
-            try {
-              localStorage.setItem(sessionStartKey, new Date().toISOString());
-            } catch (err) {}
-          }
-          return;
-        }
-
-        if (new Date(data.closedAt).getTime() > new Date(startedAt).getTime()) {
-          handleEndClientSession();
         }
       } catch (e) {
         // ignore network error during polling
       }
     };
 
-    // Run once immediately: waiting 4s means the previous diner's history is visible for
-    // those seconds, which is exactly what we are trying to avoid.
-    checkSessionStatus();
     const interval = setInterval(checkSessionStatus, 4000);
     return () => clearInterval(interval);
-  }, [establishmentId, tableId, sessionEnded, dinerName, sessionOrderIds.length]);
+  }, [establishmentId, tableId]);
 
   // Send table call to waiter / request bill
   const handleSendTableCall = async (type: 'waiter_call' | 'bill_request') => {
@@ -484,6 +476,9 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
     if (type === 'bill_request' && billRequestCooldown > 0) return;
 
     setCallSending(true);
+    if (type === 'waiter_call') setWaiterCallCooldown(30);
+    if (type === 'bill_request') setBillRequestCooldown(30);
+
     try {
       const res = await fetch(`/api/establishments/${establishmentId}/calls`, {
         method: 'POST',
@@ -495,8 +490,6 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
         }),
       });
       if (res.ok) {
-        if (type === 'waiter_call') setWaiterCallCooldown(30);
-        if (type === 'bill_request') setBillRequestCooldown(30);
         const msg = type === 'waiter_call' ? '🛎️ ¡Se ha notificado al mozo!' : '🧾 ¡Se ha solicitado la cuenta!';
         setCallNotice(msg);
         setTimeout(() => setCallNotice(null), 3500);
@@ -1234,12 +1227,12 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
                 setDinerName(trimmed);
                 try {
                   localStorage.setItem(`mimenu_diner_${establishmentId}_${tableId}`, trimmed);
-                  // Stamp when this sitting began. The server keeps the last closedAt of
-                  // the table forever, so without this the previous close would keep
-                  // killing every new session (see the session poll below).
-                  localStorage.setItem(sessionStartKey, new Date().toISOString());
                 } catch (err) {}
                 setIsWelcomeModalOpen(false);
+                // Clear server table session flag so new session starts cleanly
+                fetch(`/api/establishments/${establishmentId}/tables/${tableId}/session`, {
+                  method: 'DELETE',
+                }).catch(() => {});
               }} className="space-y-4">
                 <input
                   id="input-diner-name"
@@ -1293,12 +1286,7 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
 
               <button
                 id="btn-restart-client-session"
-                onClick={() => {
-                  setSessionEnded(false);
-                  setDinerName('');
-                  setNameInput('');
-                  setIsWelcomeModalOpen(true);
-                }}
+                onClick={handleRestartSession}
                 className="w-full py-3.5 px-4 rounded-xl text-xs font-black uppercase tracking-widest bg-amber-500 text-zinc-950 hover:bg-amber-400 transition cursor-pointer shadow-lg"
               >
                 Iniciar Nueva Sesión

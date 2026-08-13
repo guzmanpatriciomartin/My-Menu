@@ -132,6 +132,8 @@ type NotifyType = 'ORDER_CREATED' | 'ORDER_STATUS_CHANGED' | 'MENU_CHANGED' | 'T
 
 interface NotifyPayload {
   establishmentId: string;
+  tableId?: string;
+  closedAt?: string;
   order?: Order;
 }
 
@@ -463,6 +465,9 @@ class Store {
       paymentStatus: null,
     };
 
+    // Clear any previous closed session flag when a new order is placed
+    this.clearTableSession(establishmentId, tableId);
+
     try {
       await setDoc(doc(db, 'orders', newOrder.id), forFirestore(newOrder));
     } catch (err) {
@@ -653,9 +658,20 @@ class Store {
 
   // Table Calls & Notifications
   public getTableCalls(establishmentId: string): TableCall[] {
-    return this.tableCalls
+    const sortedCalls = this.tableCalls
       .filter((c) => c.establishmentId === establishmentId)
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    // Filter duplicate pending calls for the same table and call type (keep the newest)
+    const seenPending = new Set<string>();
+    return sortedCalls.filter((call) => {
+      if (call.status === 'pending') {
+        const key = `${call.tableId}_${call.type}`;
+        if (seenPending.has(key)) return false;
+        seenPending.add(key);
+      }
+      return true;
+    });
   }
 
   public async createTableCall(input: {
@@ -668,6 +684,36 @@ class Store {
       (t) => t.id === input.tableId && t.establishmentId === input.establishmentId
     );
     if (!table) return null;
+
+    // Check if an active pending call already exists for this table and call type
+    const existingIndex = this.tableCalls.findIndex(
+      (c) =>
+        c.establishmentId === input.establishmentId &&
+        c.tableId === input.tableId &&
+        c.type === input.type &&
+        c.status === 'pending'
+    );
+
+    if (existingIndex !== -1) {
+      // Reuse existing pending call to avoid creating duplicate requests
+      const existingCall = this.tableCalls[existingIndex];
+      const updatedCall: TableCall = {
+        ...existingCall,
+        tableName: table.name,
+        dinerName: input.dinerName || existingCall.dinerName,
+        createdAt: new Date().toISOString(),
+      };
+
+      try {
+        await setDoc(doc(db, 'tableCalls', updatedCall.id), updatedCall);
+      } catch (e) {
+        console.error('[Firestore] createTableCall update existing error:', e);
+      }
+
+      this.tableCalls[existingIndex] = updatedCall;
+      this.notifyClients('TABLE_CALL_CREATED', { establishmentId: input.establishmentId });
+      return updatedCall;
+    }
 
     const newCall: TableCall = {
       id: 'call-' + Math.random().toString(36).substring(2, 9),
@@ -700,15 +746,35 @@ class Store {
     );
     if (index === -1) return null;
 
-    const updated: TableCall = { ...this.tableCalls[index], status };
+    const targetCall = this.tableCalls[index];
+    const updatedTarget: TableCall = { ...targetCall, status };
+
+    // Find all matching calls for the same table and type in pending status to clear duplicates together
+    const matchingCalls = this.tableCalls.filter(
+      (c) =>
+        c.establishmentId === establishmentId &&
+        c.tableId === targetCall.tableId &&
+        c.type === targetCall.type &&
+        (c.id === callId || c.status === 'pending')
+    );
+
     try {
-      await setDoc(doc(db, 'tableCalls', updated.id), forFirestore(updated));
+      for (const call of matchingCalls) {
+        await setDoc(doc(db, 'tableCalls', call.id), forFirestore({ ...call, status }));
+      }
     } catch (e) {
       console.error('[Firestore] updateTableCallStatus error:', e);
     }
-    this.tableCalls[index] = updated;
+
+    for (const call of matchingCalls) {
+      const idx = this.tableCalls.findIndex((c) => c.id === call.id);
+      if (idx !== -1) {
+        this.tableCalls[idx] = { ...this.tableCalls[idx], status };
+      }
+    }
+
     this.notifyClients('TABLE_CALL_CREATED', { establishmentId });
-    return updated;
+    return updatedTarget;
   }
 
   // Close Table Session (Admin Action)
@@ -743,8 +809,13 @@ class Store {
       await this.updateTableCallStatus(call.id, establishmentId, 'attended');
     }
 
-    this.notifyClients('TABLE_SESSION_CLOSED', { establishmentId });
+    this.notifyClients('TABLE_SESSION_CLOSED', { establishmentId, tableId, closedAt });
     return { ok: true, closedAt, ordersClosedCount };
+  }
+
+  public clearTableSession(establishmentId: string, tableId: string): void {
+    const sessionKey = `${establishmentId}_${tableId}`;
+    this.closedSessions.delete(sessionKey);
   }
 
   public getTableSessionStatus(establishmentId: string, tableId: string): { closedAt?: string } {
@@ -942,6 +1013,9 @@ class Store {
     if (type === 'MENU_CHANGED') return true;
     if (type === 'ORDER_STATUS_CHANGED') {
       return payload.order?.tableId === client.tableId;
+    }
+    if (type === 'TABLE_SESSION_CLOSED') {
+      return payload.tableId === client.tableId;
     }
     // ORDER_CREATED and TABLES_CHANGED are never delivered to a diner.
     return false;
