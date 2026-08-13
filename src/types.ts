@@ -48,12 +48,28 @@ export interface Order {
   establishmentId: string;
   tableId: string;
   tableName: string;
+  // Name the diner gave when starting the session. Written by the store on every order
+  // and displayed in both panels — optional only because older orders lack it.
+  dinerName?: string;
   items: OrderItem[];
   status: OrderStatus;
   cancellationReason?: string;
   createdAt: string;
   updatedAt: string;
   paymentStatus: 'pending' | 'paid' | null; // Placeholder for v1.1 roadmap
+}
+
+// Waiter call / bill request raised from a table. Used by the store, the API layer and
+// both panels.
+export interface TableCall {
+  id: string;
+  establishmentId: string;
+  tableId: string;
+  tableName: string;
+  dinerName?: string;
+  type: 'waiter_call' | 'bill_request';
+  status: 'pending' | 'attended';
+  createdAt: string;
 }
 
 export type UserRole = 'admin' | 'waiter';

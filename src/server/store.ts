@@ -51,6 +51,21 @@ export interface CreateOrderInput {
   items: OrderDraftItem[];
 }
 
+// Firestore rejects `undefined` as a field value outright — the whole write throws with
+// "Unsupported field value: undefined". Our documents come from interfaces with optional
+// fields (cancellationReason, dinerName…), and an unset optional serializes to exactly
+// that. Without this, an ordinary order with no cancellation reason cannot be saved: the
+// write throws, the catch swallows it, memory looks updated, and the next snapshot
+// silently rolls it back — which reads as "the order status won't change".
+// Dropping the key makes "absent" mean absent, which is what Firestore expects.
+function forFirestore<T extends object>(value: T): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, fieldValue] of Object.entries(value)) {
+    if (fieldValue !== undefined) out[key] = fieldValue;
+  }
+  return out;
+}
+
 // Result of a create attempt. A single shape (rather than a discriminated union)
 // because this project compiles with strictNullChecks OFF, where boolean-discriminant
 // narrowing is unreliable. The endpoint maps each outcome to a status code:
@@ -239,11 +254,25 @@ class Store {
   private async seedIfEmpty() {
     for (const { name, items } of SEED_COLLECTIONS) {
       const snap = await getDocs(query(collection(db, name), limit(1)));
+
+      // An offline read is served from the local cache, which starts out empty — so
+      // "empty" here would mean "we could not reach Firestore", not "there is no data".
+      // Seeding on that queues writes on fixed document ids that flush once the
+      // connection returns, overwriting real data with demo data. When we cannot verify,
+      // we do nothing: a missing seed is recoverable, an overwrite is not.
+      if (snap.metadata.fromCache) {
+        console.warn(
+          `[Firestore] Skipping seed check for "${name}": read came from cache (offline). ` +
+            'Cannot tell an empty collection from an unreachable backend.'
+        );
+        continue;
+      }
+
       if (snap.empty) {
         console.log(`[Firestore] Seeding empty collection "${name}"...`);
         const batch = writeBatch(db);
         for (const item of items) {
-          batch.set(doc(db, name, item.id), item as Record<string, unknown>);
+          batch.set(doc(db, name, item.id), forFirestore(item));
         }
         await batch.commit();
       }
@@ -258,7 +287,7 @@ class Store {
     for (const { name, items } of SEED_COLLECTIONS) {
       const batch = writeBatch(db);
       for (const item of items) {
-        batch.set(doc(db, name, item.id), item as Record<string, unknown>);
+        batch.set(doc(db, name, item.id), forFirestore(item));
       }
       await batch.commit();
     }
@@ -372,7 +401,7 @@ class Store {
     this.clearTableSession(establishmentId, tableId);
 
     try {
-      await setDoc(doc(db, 'orders', newOrder.id), newOrder);
+      await setDoc(doc(db, 'orders', newOrder.id), forFirestore(newOrder));
     } catch (err) {
       console.error('[Firestore] Order save error, persisting in memory:', err);
     }
@@ -398,7 +427,7 @@ class Store {
     };
 
     try {
-      await setDoc(doc(db, 'orders', updated.id), updated);
+      await setDoc(doc(db, 'orders', updated.id), forFirestore(updated));
     } catch (e) {
       console.error('[Firestore] Order status write error:', e);
     }
@@ -420,7 +449,7 @@ class Store {
     }
 
     try {
-      await setDoc(doc(db, 'menuItems', item.id), item);
+      await setDoc(doc(db, 'menuItems', item.id), forFirestore(item));
     } catch (e) {
       console.error('[Firestore] saveMenuItem error:', e);
     }
@@ -462,7 +491,7 @@ class Store {
     }
 
     try {
-      await setDoc(doc(db, 'categories', category.id), category);
+      await setDoc(doc(db, 'categories', category.id), forFirestore(category));
     } catch (e) {
       console.error('[Firestore] saveCategory error:', e);
     }
@@ -518,7 +547,7 @@ class Store {
     }
 
     try {
-      await setDoc(doc(db, 'tables', table.id), table);
+      await setDoc(doc(db, 'tables', table.id), forFirestore(table));
     } catch (e) {
       console.error('[Firestore] saveTable error:', e);
     }
@@ -596,7 +625,7 @@ class Store {
       };
 
       try {
-        await setDoc(doc(db, 'tableCalls', updatedCall.id), updatedCall);
+        await setDoc(doc(db, 'tableCalls', updatedCall.id), forFirestore(updatedCall));
       } catch (e) {
         console.error('[Firestore] createTableCall update existing error:', e);
       }
@@ -618,7 +647,7 @@ class Store {
     };
 
     try {
-      await setDoc(doc(db, 'tableCalls', newCall.id), newCall);
+      await setDoc(doc(db, 'tableCalls', newCall.id), forFirestore(newCall));
     } catch (e) {
       console.error('[Firestore] createTableCall error:', e);
     }
@@ -651,7 +680,7 @@ class Store {
 
     try {
       for (const call of matchingCalls) {
-        await setDoc(doc(db, 'tableCalls', call.id), { ...call, status });
+        await setDoc(doc(db, 'tableCalls', call.id), forFirestore({ ...call, status }));
       }
     } catch (e) {
       console.error('[Firestore] updateTableCallStatus error:', e);
