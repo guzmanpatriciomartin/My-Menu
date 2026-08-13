@@ -322,6 +322,16 @@ async function startServer() {
     }
   });
 
+  // Clear/reset session status for a table (public — diner starting new session on table)
+  app.delete('/api/establishments/:id/tables/:tableId/session', (req, res, next) => {
+    try {
+      store.clearTableSession(req.params.id, req.params.tableId);
+      res.json({ success: true });
+    } catch (e) {
+      next(e);
+    }
+  });
+
   // Get table calls for authenticated staff
   app.get('/api/my/calls', requireAuth, (req, res, next) => {
     try {

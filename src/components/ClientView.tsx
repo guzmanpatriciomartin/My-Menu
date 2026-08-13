@@ -150,6 +150,9 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
   const [loading, setLoading] = useState(true);
   
   // Diner name session state
+  const sessionStartedAtRef = React.useRef<number>(Date.now());
+  const handledClosedAtRef = React.useRef<string | null>(null);
+
   const [dinerName, setDinerName] = useState<string>(() => {
     try {
       return localStorage.getItem(`mimenu_diner_${establishmentId}_${tableId}`) || '';
@@ -312,7 +315,13 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
               .then(r => r.json())
               .then(items => setMenuItems(items));
           } else if (msg.type === 'TABLE_SESSION_CLOSED' && msg.payload.establishmentId === establishmentId) {
-            handleEndClientSession();
+            if (!msg.payload.tableId || msg.payload.tableId === tableId) {
+              const closedAt = msg.payload.closedAt || new Date().toISOString();
+              const closedAtMs = new Date(closedAt).getTime();
+              if (closedAtMs >= sessionStartedAtRef.current - 2000 && handledClosedAtRef.current !== closedAt) {
+                handleEndClientSession(closedAt);
+              }
+            }
           }
         } catch (e) {
           // ignore parsing errors
@@ -403,7 +412,11 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
   }, [cart]);
 
   // Wipe client session and show completion screen when table is closed by admin
-  const handleEndClientSession = () => {
+  const handleEndClientSession = (closedAtTimestamp?: string) => {
+    if (closedAtTimestamp) {
+      if (handledClosedAtRef.current === closedAtTimestamp) return;
+      handledClosedAtRef.current = closedAtTimestamp;
+    }
     try {
       localStorage.removeItem(`mimenu_orders_${establishmentId}_${tableId}`);
       localStorage.removeItem(`mimenu_diner_${establishmentId}_${tableId}`);
@@ -416,6 +429,21 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
     setSessionEnded(true);
   };
 
+  // Reset/Start a new session on the table
+  const handleRestartSession = async () => {
+    sessionStartedAtRef.current = Date.now();
+    handledClosedAtRef.current = null;
+    try {
+      await fetch(`/api/establishments/${establishmentId}/tables/${tableId}/session`, {
+        method: 'DELETE',
+      });
+    } catch (err) {}
+    setSessionEnded(false);
+    setDinerName('');
+    setNameInput('');
+    setIsWelcomeModalOpen(true);
+  };
+
   // Check if table session was closed by admin (polling check)
   useEffect(() => {
     const checkSessionStatus = async () => {
@@ -424,7 +452,12 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
         if (res.ok) {
           const data = await res.json();
           if (data.closedAt) {
-            handleEndClientSession();
+            const closedAtMs = new Date(data.closedAt).getTime();
+            // Only trigger closure if closedAt occurred AFTER this client session started
+            // and hasn't been handled yet for this closedAt timestamp
+            if (closedAtMs >= sessionStartedAtRef.current - 2000 && handledClosedAtRef.current !== data.closedAt) {
+              handleEndClientSession(data.closedAt);
+            }
           }
         }
       } catch (e) {
@@ -443,6 +476,9 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
     if (type === 'bill_request' && billRequestCooldown > 0) return;
 
     setCallSending(true);
+    if (type === 'waiter_call') setWaiterCallCooldown(30);
+    if (type === 'bill_request') setBillRequestCooldown(30);
+
     try {
       const res = await fetch(`/api/establishments/${establishmentId}/calls`, {
         method: 'POST',
@@ -454,8 +490,6 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
         }),
       });
       if (res.ok) {
-        if (type === 'waiter_call') setWaiterCallCooldown(30);
-        if (type === 'bill_request') setBillRequestCooldown(30);
         const msg = type === 'waiter_call' ? '🛎️ ¡Se ha notificado al mozo!' : '🧾 ¡Se ha solicitado la cuenta!';
         setCallNotice(msg);
         setTimeout(() => setCallNotice(null), 3500);
@@ -1195,6 +1229,10 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
                   localStorage.setItem(`mimenu_diner_${establishmentId}_${tableId}`, trimmed);
                 } catch (err) {}
                 setIsWelcomeModalOpen(false);
+                // Clear server table session flag so new session starts cleanly
+                fetch(`/api/establishments/${establishmentId}/tables/${tableId}/session`, {
+                  method: 'DELETE',
+                }).catch(() => {});
               }} className="space-y-4">
                 <input
                   id="input-diner-name"
@@ -1248,12 +1286,7 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
 
               <button
                 id="btn-restart-client-session"
-                onClick={() => {
-                  setSessionEnded(false);
-                  setDinerName('');
-                  setNameInput('');
-                  setIsWelcomeModalOpen(true);
-                }}
+                onClick={handleRestartSession}
                 className="w-full py-3.5 px-4 rounded-xl text-xs font-black uppercase tracking-widest bg-amber-500 text-zinc-950 hover:bg-amber-400 transition cursor-pointer shadow-lg"
               >
                 Iniciar Nueva Sesión
