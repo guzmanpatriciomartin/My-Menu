@@ -1,3 +1,7 @@
+// MUST be the first import: it populates process.env from .env before any other module
+// is evaluated. src/server/store -> src/lib/firebase-admin reads the Firebase credential
+// vars at module load, so loading .env later (e.g. in the function body) would be too late.
+import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import cookieParser from 'cookie-parser';
