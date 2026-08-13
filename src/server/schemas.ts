@@ -80,31 +80,6 @@ export const updateOrderStatusSchema = z
   .strict();
 export type UpdateOrderStatusBody = z.infer<typeof updateOrderStatusSchema>;
 
-// --- Cash close & metrics (ADR-005) ---
-// The client never sends money. Totals, orderIds, period bounds and who closed are all
-// derived server-side, so a caller cannot inflate or forge the recorded revenue.
-export const cashCloseSchema = z
-  .object({
-    note: z.string().max(500).optional(),
-  })
-  .strict();
-export type CashCloseBody = z.infer<typeof cashCloseSchema>;
-
-export const metricsQuerySchema = z
-  .object({
-    day: z
-      .string()
-      .regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato de fecha inválido (YYYY-MM-DD)')
-      .optional(),
-  })
-  .strict();
-
-export const cashClosesQuerySchema = z
-  .object({
-    limit: z.coerce.number().int().min(1).max(100).default(30),
-  })
-  .strict();
-
 // --- Menu item (admin) ---
 // establishmentId is accepted (the client sends it) but ALWAYS overridden with the
 // session tenant in the endpoint; it is never trusted for authorization.

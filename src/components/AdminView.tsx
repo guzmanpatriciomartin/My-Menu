@@ -27,22 +27,9 @@ import {
   ExternalLink,
   ShieldAlert,
   CheckCircle,
-  RefreshCw,
-  Wallet,
-  BarChart3,
-  Printer
+  RefreshCw
 } from 'lucide-react';
-import { Establishment, Category, MenuItem, Table, Order, OrderStatus, UserSession, UserRole, TableCall, CashClose, MetricsSummary } from '../types';
-
-// Mirrors the /api/my/cash-close/preview payload (server-computed; never derived here).
-interface CashClosePreview {
-  periodStart: string;
-  periodEnd: string;
-  totals: { orderCount: number; totalRevenue: number; averageTicket: number };
-  orderCount: number;
-  topProducts: { menuItemId: string; name: string; units: number; revenue: number }[];
-  byTable: { tableId: string; tableName: string; orderCount: number; revenue: number }[];
-}
+import { Establishment, Category, MenuItem, Table, Order, OrderStatus, UserSession, UserRole, TableCall } from '../types';
 import { playNewOrderSound, playAlertSound } from './SoundUtility';
 import { useTheme } from '../theme/ThemeContext';
 import ThemeTriggerButton from './ThemeTriggerButton';
@@ -80,21 +67,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   // Active states
   const [loading, setLoading] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(true);
-  const [activeTab, setActiveTab] = useState<'diseño_mesas' | 'pedidos' | 'menu_items' | 'historial' | 'caja' | 'metricas'>('pedidos');
-
-  // Cash close (ADR-005). Preview is what the shift has pending right now; closes is the
-  // history. Both are available to waiters — closing the register is shift work.
-  const [cashPreview, setCashPreview] = useState<CashClosePreview | null>(null);
-  const [cashCloses, setCashCloses] = useState<CashClose[]>([]);
-  const [isClosingCash, setIsClosingCash] = useState(false);
-  const [confirmCashClose, setConfirmCashClose] = useState(false);
-  const [lastReceipt, setLastReceipt] = useState<CashClose | null>(null);
-  const [cashError, setCashError] = useState('');
-
-  // Metrics panel (admin only).
-  const [metrics, setMetrics] = useState<MetricsSummary | null>(null);
-  const [metricsDay, setMetricsDay] = useState('');
-  const [metricsLoading, setMetricsLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState<'diseño_mesas' | 'pedidos' | 'menu_items' | 'historial'>('pedidos');
 
   // Mutation and Selection modallers
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
@@ -292,14 +265,6 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     const interval = setInterval(fetchDbState, 3000);
     return () => clearInterval(interval);
   }, [currentUser, activeEstId, soundEnabled]);
-
-  // Load tab data on demand: neither panel is needed until it is opened, and the metrics
-  // endpoint is admin-only (a waiter opening the app should never call it).
-  useEffect(() => {
-    if (!currentUser) return;
-    if (activeTab === 'caja') fetchCashState();
-    if (activeTab === 'metricas' && currentUser.role === 'admin') fetchMetrics(metricsDay || undefined);
-  }, [activeTab, currentUser]);
 
   // SSE handler for instantaneous real-time refresh (RF-A03, RF-C08)
   useEffect(() => {
@@ -587,84 +552,6 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
 
   const formatPrice = (price: number) => {
     return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', minimumFractionDigits: 0 }).format(price);
-  };
-
-  const formatDateTime = (iso: string) => {
-    if (!iso) return '—';
-    return new Date(iso).toLocaleString('es-AR', {
-      timeZone: 'America/Argentina/Buenos_Aires',
-      day: '2-digit',
-      month: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  };
-
-  // --- Cash close (ADR-005) ---
-
-  const fetchCashState = async () => {
-    try {
-      const [previewRes, closesRes] = await Promise.all([
-        fetch('/api/my/cash-close/preview', { credentials: 'include' }).then(r => r.json()),
-        fetch('/api/my/cash-closes', { credentials: 'include' }).then(r => r.json()).catch(() => [])
-      ]);
-      if (previewRes && previewRes.totals) setCashPreview(previewRes);
-      if (Array.isArray(closesRes)) setCashCloses(closesRes);
-    } catch (err) {
-      console.error('Failed to load cash state', err);
-    }
-  };
-
-  const handleCashClose = async () => {
-    setIsClosingCash(true);
-    setCashError('');
-    try {
-      const res = await fetch('/api/my/cash-close', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({})
-      });
-
-      if (res.status === 409) {
-        setCashError('No hay pedidos entregados pendientes de cierre.');
-        return;
-      }
-      if (!res.ok) {
-        setCashError('No se pudo cerrar la caja. Intentá de nuevo.');
-        return;
-      }
-
-      const receipt: CashClose = await res.json();
-      setLastReceipt(receipt);
-      setConfirmCashClose(false);
-      // Re-read instead of patching locally: the server is the source of truth for what
-      // ended up inside the close.
-      await Promise.all([fetchCashState(), fetchDbState()]);
-    } catch (err) {
-      console.error('Cash close failed', err);
-      setCashError('No se pudo conectar con el servidor.');
-    } finally {
-      setIsClosingCash(false);
-    }
-  };
-
-  // --- Metrics (admin only) ---
-
-  const fetchMetrics = async (day?: string) => {
-    setMetricsLoading(true);
-    try {
-      const url = day ? `/api/my/metrics?day=${encodeURIComponent(day)}` : '/api/my/metrics';
-      const res = await fetch(url, { credentials: 'include' });
-      if (!res.ok) return;
-      const data: MetricsSummary = await res.json();
-      setMetrics(data);
-      setMetricsDay(data.day);
-    } catch (err) {
-      console.error('Failed to load metrics', err);
-    } finally {
-      setMetricsLoading(false);
-    }
   };
 
   // Download tent card QR Code canvas image helpers (RF-A10)
@@ -1027,69 +914,40 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
             </div>
           </button>
 
-          {/* Mesas & QRs is available to waiters too: closing a table and printing a QR
-              are floor tasks. The admin-only bits (create/edit/delete table) are hidden
-              inside the panel, and the server enforces that split regardless. */}
-          <button
-            id="tab-btn-diseño_mesas"
-            onClick={() => setActiveTab('diseño_mesas')}
-            className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center transition min-w-[124px] md:w-full shrink-0 border ${
-              activeTab === 'diseño_mesas'
-                ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold shadow-md'
-                : `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
-            }`}
-          >
-            <Users className="w-4 h-4 mr-2.5" />
-            Mesas & QRs
-          </button>
-
-          <button
-            id="tab-btn-caja"
-            onClick={() => setActiveTab('caja')}
-            className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center transition min-w-[124px] md:w-full shrink-0 border ${
-              activeTab === 'caja'
-                ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold shadow-md'
-                : `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
-            }`}
-          >
-            <Wallet className="w-4 h-4 mr-2.5" />
-            Cierre de Caja
-          </button>
-
           {/* Guard sections dynamically based on waiter role limitations (RF-A13) */}
           {currentUser.role === 'admin' ? (
             <>
               <button
+                id="tab-btn-diseño_mesas"
+                onClick={() => setActiveTab('diseño_mesas')}
+                className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center transition min-w-[124px] md:w-full shrink-0 border ${
+                  activeTab === 'diseño_mesas' 
+                    ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold shadow-md' 
+                    : `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
+                }`}
+              >
+                <Users className="w-4 h-4 mr-2.5" />
+                Mesas & QRs
+              </button>
+
+              <button
                 id="tab-btn-menu_items"
                 onClick={() => setActiveTab('menu_items')}
                 className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center transition min-w-[124px] md:w-full shrink-0 border ${
-                  activeTab === 'menu_items'
-                    ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold shadow-md'
+                  activeTab === 'menu_items' 
+                    ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold shadow-md' 
                     : `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
                 }`}
               >
                 <Utensils className="w-4 h-4 mr-2.5" />
                 Catálogo Menú
               </button>
-
-              <button
-                id="tab-btn-metricas"
-                onClick={() => setActiveTab('metricas')}
-                className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center transition min-w-[124px] md:w-full shrink-0 border ${
-                  activeTab === 'metricas'
-                    ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold shadow-md'
-                    : `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
-                }`}
-              >
-                <BarChart3 className="w-4 h-4 mr-2.5" />
-                Métricas
-              </button>
             </>
           ) : (
             <div className={`hidden md:flex flex-col items-center p-4 ${classes.bgCard} ${classes.radiusCard} border ${classes.borderCard} text-center space-y-1.5 my-2`}>
               <ShieldAlert className="w-4.5 h-4.5 text-zinc-500" />
               <p className={`text-[9px] font-black uppercase font-mono ${classes.textMuted} tracking-wider`}>Acceso Mesero</p>
-              <p className={`text-[9px] ${classes.textMuted} font-medium`}>Catálogo y métricas bloqueados</p>
+              <p className={`text-[9px] ${classes.textMuted} font-medium`}>Catálogo de Menú y Mesas bloqueados</p>
             </div>
           )}
 
@@ -1299,7 +1157,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
           )}
 
           {/* TAB 2: Table design & generating printable QRs (RF-A10) */}
-          {activeTab === 'diseño_mesas' && (
+          {activeTab === 'diseño_mesas' && currentUser.role === 'admin' && (
             <div className="space-y-6">
               
               <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 flex flex-wrap items-center justify-between gap-4`}>
@@ -1308,20 +1166,17 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                   <p className={`text-xs ${classes.textMuted} font-medium`}>Administra los códigos QR de cada mesa. Los códigos enlazan automáticamente la mesa con el pedido.</p>
                 </div>
 
-                {/* Creating tables is admin-only (the server rejects it for a waiter). */}
-                {currentUser.role === 'admin' && (
-                  <button
-                    id="btn-create-table"
-                    onClick={() => {
-                      setEditingTable({ name: '', active: true });
-                      setIsTableModalOpen(true);
-                    }}
-                    className={`px-4.5 py-3 ${classes.radiusBtn} text-xs font-black text-zinc-950 bg-amber-500 hover:bg-amber-400 transition flex items-center space-x-2 cursor-pointer uppercase tracking-widest shadow-md`}
-                  >
-                    <Plus className="w-4 h-4" />
-                    <span>Crear Nueva Mesa</span>
-                  </button>
-                )}
+                <button
+                  id="btn-create-table"
+                  onClick={() => {
+                    setEditingTable({ name: '', active: true });
+                    setIsTableModalOpen(true);
+                  }}
+                  className={`px-4.5 py-3 ${classes.radiusBtn} text-xs font-black text-zinc-950 bg-amber-500 hover:bg-amber-400 transition flex items-center space-x-2 cursor-pointer uppercase tracking-widest shadow-md`}
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Crear Nueva Mesa</span>
+                </button>
               </div>
 
               {/* Grid of tables */}
@@ -1365,33 +1220,27 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       </div>
 
                       <div className={`mt-4 pt-3.5 border-t ${classes.borderCard} flex items-center justify-between gap-1 flex-wrap`}>
-                        {/* Editing and deleting a table are admin-only; a waiter sees an
-                            empty slot here and keeps the floor actions on the right. */}
                         <div className="flex items-center space-x-1">
-                          {currentUser.role === 'admin' && (
-                            <>
-                              <button
-                                id={`btn-edit-table-${table.id}`}
-                                onClick={() => {
-                                  setEditingTable(table);
-                                  setIsTableModalOpen(true);
-                                }}
-                                className={`p-2 ${classes.radiusBtn} ${classes.textMuted} hover:${classes.textPrimary} ${classes.bgCard} border ${classes.borderCard} transition`}
-                                title="Editar mesa"
-                              >
-                                <Edit className="w-3.5 h-3.5" />
-                              </button>
+                          <button
+                            id={`btn-edit-table-${table.id}`}
+                            onClick={() => {
+                              setEditingTable(table);
+                              setIsTableModalOpen(true);
+                            }}
+                            className={`p-2 ${classes.radiusBtn} ${classes.textMuted} hover:${classes.textPrimary} ${classes.bgCard} border ${classes.borderCard} transition`}
+                            title="Editar mesa"
+                          >
+                            <Edit className="w-3.5 h-3.5" />
+                          </button>
 
-                              <button
-                                id={`btn-delete-table-${table.id}`}
-                                onClick={() => handleDeleteTable(table.id)}
-                                className={`p-2 ${classes.radiusBtn} text-rose-500 hover:text-rose-400 ${classes.bgCard} border ${classes.borderCard} hover:bg-rose-500/10 transition`}
-                                title="Eliminar mesa"
-                              >
-                                <Trash className="w-3.5 h-3.5" />
-                              </button>
-                            </>
-                          )}
+                          <button
+                            id={`btn-delete-table-${table.id}`}
+                            onClick={() => handleDeleteTable(table.id)}
+                            className={`p-2 ${classes.radiusBtn} text-rose-500 hover:text-rose-400 ${classes.bgCard} border ${classes.borderCard} hover:bg-rose-500/10 transition`}
+                            title="Eliminar mesa"
+                          >
+                            <Trash className="w-3.5 h-3.5" />
+                          </button>
                         </div>
 
                         <div className="flex items-center space-x-1">
@@ -1652,263 +1501,6 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
           )}
 
           {/* TAB 4: Daily Revenue list */}
-          {/* TAB: Cash close — available to admin and waiter (shift work). */}
-          {activeTab === 'caja' && (
-            <div className="space-y-6">
-              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 space-y-1`}>
-                <h2 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>Cierre de Caja</h2>
-                <p className={`text-xs ${classes.textMuted} font-medium`}>
-                  Solo se cuentan los pedidos <span className="font-black">entregados</span> que todavía no fueron cerrados. Al cerrar, quedan registrados y no se pueden modificar.
-                </p>
-              </div>
-
-              {/* Open period */}
-              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-6 space-y-5`}>
-                <div className="flex items-start justify-between flex-wrap gap-4">
-                  <div className="space-y-1">
-                    <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>Total del turno</span>
-                    <span id="cash-open-total" className="text-3xl font-black text-amber-500 block">
-                      {formatPrice(cashPreview?.totals.totalRevenue ?? 0)}
-                    </span>
-                    <span className={`text-[10px] ${classes.textMuted} font-mono block pt-1`}>
-                      Desde {formatDateTime(cashPreview?.periodStart || '')}
-                    </span>
-                  </div>
-
-                  <div className="flex gap-6">
-                    <div className="space-y-1">
-                      <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>Pedidos</span>
-                      <span className={`text-xl font-black ${classes.textPrimary}`}>{cashPreview?.totals.orderCount ?? 0}</span>
-                    </div>
-                    <div className="space-y-1">
-                      <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>Ticket prom.</span>
-                      <span className={`text-xl font-black ${classes.textPrimary}`}>{formatPrice(cashPreview?.totals.averageTicket ?? 0)}</span>
-                    </div>
-                  </div>
-                </div>
-
-                {cashError && (
-                  <p className="text-[11px] font-black text-rose-400 font-mono uppercase tracking-wider">{cashError}</p>
-                )}
-
-                <button
-                  id="btn-open-cash-close"
-                  onClick={() => { setCashError(''); setConfirmCashClose(true); }}
-                  disabled={isClosingCash || !cashPreview || cashPreview.totals.orderCount === 0}
-                  className={`px-5 py-3 ${classes.radiusBtn} text-xs font-black uppercase tracking-widest transition flex items-center space-x-2 ${
-                    !cashPreview || cashPreview.totals.orderCount === 0
-                      ? `${classes.inputBg} ${classes.textMuted} cursor-not-allowed border ${classes.borderCard}`
-                      : 'bg-amber-500 hover:bg-amber-400 text-zinc-950 cursor-pointer shadow-md'
-                  }`}
-                >
-                  <Wallet className="w-4 h-4" />
-                  <span>{cashPreview && cashPreview.totals.orderCount === 0 ? 'Nada para cerrar' : 'Cerrar caja'}</span>
-                </button>
-              </div>
-
-              {/* Receipt of the close just made */}
-              {lastReceipt && (
-                <div id="cash-receipt" className={`${classes.bgCard} border-2 border-amber-500 ${classes.radiusCard} p-6 space-y-4`}>
-                  <div className="flex items-center justify-between flex-wrap gap-3">
-                    <h3 className={`text-xs font-black uppercase ${classes.textPrimary} tracking-widest flex items-center gap-2`}>
-                      <CheckCircle className="w-4 h-4 text-amber-500" /> Cierre registrado
-                    </h3>
-                    <button
-                      onClick={() => window.print()}
-                      className={`px-3 py-2 ${classes.radiusBtn} ${classes.inputBg} border ${classes.borderCard} ${classes.textSecondary} hover:${classes.textPrimary} text-[10px] font-black uppercase tracking-widest flex items-center gap-1.5 cursor-pointer`}
-                    >
-                      <Printer className="w-3 h-3" /> Imprimir
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 font-mono">
-                    <div>
-                      <span className={`text-[9px] ${classes.textMuted} uppercase block tracking-widest`}>Responsable</span>
-                      <span className={`text-xs font-black ${classes.textPrimary}`}>{lastReceipt.closedByName}</span>
-                    </div>
-                    <div>
-                      <span className={`text-[9px] ${classes.textMuted} uppercase block tracking-widest`}>Cierre</span>
-                      <span className={`text-xs font-black ${classes.textPrimary}`}>{formatDateTime(lastReceipt.periodEnd)}</span>
-                    </div>
-                    <div>
-                      <span className={`text-[9px] ${classes.textMuted} uppercase block tracking-widest`}>Pedidos</span>
-                      <span className={`text-xs font-black ${classes.textPrimary}`}>{lastReceipt.totals.orderCount}</span>
-                    </div>
-                    <div>
-                      <span className={`text-[9px] ${classes.textMuted} uppercase block tracking-widest`}>Total</span>
-                      <span className="text-xs font-black text-amber-500">{formatPrice(lastReceipt.totals.totalRevenue)}</span>
-                    </div>
-                  </div>
-
-                  {lastReceipt.byTable.length > 0 && (
-                    <div className={`border-t ${classes.borderCard} pt-3 space-y-1.5`}>
-                      <span className={`text-[9px] ${classes.textMuted} font-mono uppercase tracking-widest block`}>Detalle por mesa</span>
-                      {lastReceipt.byTable.map((t) => (
-                        <div key={t.tableId} className="flex items-center justify-between text-xs">
-                          <span className={classes.textSecondary}>{t.tableName} <span className={classes.textMuted}>({t.orderCount})</span></span>
-                          <span className={`font-black ${classes.textPrimary} font-mono`}>{formatPrice(t.revenue)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Previous closes */}
-              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} overflow-hidden`}>
-                <div className={`p-4 ${classes.bgHeader} border-b ${classes.borderCard} font-mono text-[9px] ${classes.textMuted} tracking-widest uppercase font-black`}>
-                  Cierres anteriores
-                </div>
-                {cashCloses.length === 0 ? (
-                  <p className={`p-5 text-xs ${classes.textMuted} font-medium`}>Todavía no hay cierres registrados.</p>
-                ) : (
-                  <div className={`divide-y ${classes.borderCard}`}>
-                    {cashCloses.map((c) => (
-                      <div key={c.id} className="p-4 flex items-center justify-between flex-wrap gap-2">
-                        <div className="space-y-0.5">
-                          <span className={`text-xs font-black ${classes.textPrimary} block`}>{formatDateTime(c.periodEnd)}</span>
-                          <span className={`text-[10px] ${classes.textMuted} font-mono`}>
-                            {c.closedByName} · {c.totals.orderCount} pedidos
-                          </span>
-                        </div>
-                        <span className="text-sm font-black text-amber-500 font-mono">{formatPrice(c.totals.totalRevenue)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* TAB: Metrics — admin only (the endpoint also enforces it). */}
-          {activeTab === 'metricas' && currentUser.role === 'admin' && (
-            <div className="space-y-6">
-              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 flex flex-wrap items-center justify-between gap-4`}>
-                <div className="space-y-1">
-                  <h2 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>Métricas de Venta</h2>
-                  <p className={`text-xs ${classes.textMuted} font-medium`}>Solo pedidos entregados. Horarios en hora local.</p>
-                </div>
-                <input
-                  id="metrics-day"
-                  type="date"
-                  value={metricsDay}
-                  onChange={(e) => { setMetricsDay(e.target.value); fetchMetrics(e.target.value); }}
-                  className={`px-3 py-2 ${classes.inputBg} border ${classes.borderCard} ${classes.radiusBtn} ${classes.textPrimary} text-xs font-mono`}
-                />
-              </div>
-
-              {metricsLoading && !metrics ? (
-                <p className={`text-xs ${classes.textMuted} font-mono`}>Cargando…</p>
-              ) : metrics && (
-                <>
-                  {/* KPIs */}
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                    <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 space-y-1`}>
-                      <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>Recaudación</span>
-                      <span id="metrics-revenue" className="text-2xl font-black text-amber-500 block">{formatPrice(metrics.totals.totalRevenue)}</span>
-                      <div className="flex gap-3 pt-1 flex-wrap">
-                        {/* null means "no history to compare", which is different from 0 */}
-                        <span className={`text-[10px] font-mono ${classes.textMuted}`}>
-                          vs ayer:{' '}
-                          {metrics.comparison.vsYesterday?.pct == null ? (
-                            <span className={classes.textMuted}>sin datos</span>
-                          ) : (
-                            <span className={metrics.comparison.vsYesterday.pct >= 0 ? 'text-emerald-400 font-black' : 'text-rose-400 font-black'}>
-                              {metrics.comparison.vsYesterday.pct >= 0 ? '+' : ''}{metrics.comparison.vsYesterday.pct.toFixed(0)}%
-                            </span>
-                          )}
-                        </span>
-                        <span className={`text-[10px] font-mono ${classes.textMuted}`}>
-                          vs prom. 7d:{' '}
-                          {metrics.comparison.vsWeekAvg?.pct == null ? (
-                            <span className={classes.textMuted}>sin datos</span>
-                          ) : (
-                            <span className={metrics.comparison.vsWeekAvg.pct >= 0 ? 'text-emerald-400 font-black' : 'text-rose-400 font-black'}>
-                              {metrics.comparison.vsWeekAvg.pct >= 0 ? '+' : ''}{metrics.comparison.vsWeekAvg.pct.toFixed(0)}%
-                            </span>
-                          )}
-                        </span>
-                      </div>
-                    </div>
-                    <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 space-y-1`}>
-                      <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>Pedidos</span>
-                      <span className={`text-2xl font-black ${classes.textPrimary} block`}>{metrics.totals.orderCount}</span>
-                    </div>
-                    <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 space-y-1`}>
-                      <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>Ticket promedio</span>
-                      <span className={`text-2xl font-black ${classes.textPrimary} block`}>{formatPrice(metrics.totals.averageTicket)}</span>
-                    </div>
-                  </div>
-
-                  {/* Sales by hour */}
-                  <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 space-y-3`}>
-                    <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>Ventas por hora</span>
-                    {(() => {
-                      const peak = Math.max(...metrics.byHour.map((h) => h.revenue), 1);
-                      return (
-                        <div className="flex items-end gap-0.5 h-28">
-                          {metrics.byHour.map((h) => (
-                            <div key={h.hour} className="flex-1 flex flex-col items-center justify-end h-full group" title={`${h.hour}:00 — ${formatPrice(h.revenue)} (${h.orderCount})`}>
-                              <div
-                                className={`w-full ${h.revenue > 0 ? 'bg-amber-500' : classes.inputBg} rounded-sm transition-all group-hover:bg-amber-400`}
-                                style={{ height: `${Math.max((h.revenue / peak) * 100, h.revenue > 0 ? 4 : 2)}%` }}
-                              />
-                              {h.hour % 6 === 0 && (
-                                <span className={`text-[8px] ${classes.textMuted} font-mono mt-1`}>{h.hour}</span>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      );
-                    })()}
-                  </div>
-
-                  {/* Top products & by table */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} overflow-hidden`}>
-                      <div className={`p-4 ${classes.bgHeader} border-b ${classes.borderCard} font-mono text-[9px] ${classes.textMuted} tracking-widest uppercase font-black`}>
-                        Más vendidos
-                      </div>
-                      {metrics.topProducts.length === 0 ? (
-                        <p className={`p-4 text-xs ${classes.textMuted}`}>Sin ventas en el día.</p>
-                      ) : (
-                        <div className={`divide-y ${classes.borderCard}`}>
-                          {metrics.topProducts.slice(0, 8).map((p) => (
-                            <div key={p.menuItemId} className="p-3 flex items-center justify-between gap-2">
-                              <span className={`text-xs ${classes.textSecondary} truncate`}>{p.name}</span>
-                              <span className="text-[10px] font-mono shrink-0">
-                                <span className={`font-black ${classes.textPrimary}`}>{p.units}u</span>
-                                <span className={`${classes.textMuted}`}> · {formatPrice(p.revenue)}</span>
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} overflow-hidden`}>
-                      <div className={`p-4 ${classes.bgHeader} border-b ${classes.borderCard} font-mono text-[9px] ${classes.textMuted} tracking-widest uppercase font-black`}>
-                        Por mesa
-                      </div>
-                      {metrics.byTable.length === 0 ? (
-                        <p className={`p-4 text-xs ${classes.textMuted}`}>Sin ventas en el día.</p>
-                      ) : (
-                        <div className={`divide-y ${classes.borderCard}`}>
-                          {metrics.byTable.map((t) => (
-                            <div key={t.tableId} className="p-3 flex items-center justify-between gap-2">
-                              <span className={`text-xs ${classes.textSecondary}`}>{t.tableName} <span className={classes.textMuted}>({t.orderCount})</span></span>
-                              <span className={`text-[10px] font-mono font-black ${classes.textPrimary}`}>{formatPrice(t.revenue)}</span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
           {activeTab === 'historial' && (
             <div className="space-y-6">
               
@@ -2299,57 +1891,6 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                   </button>
                 </div>
               </form>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
-
-      {/* MODAL: Cash close confirmation — irreversible, so it shows the amount first */}
-      <AnimatePresence>
-        {confirmCashClose && cashPreview && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 0.5 }}
-              exit={{ opacity: 0 }}
-              onClick={() => !isClosingCash && setConfirmCashClose(false)}
-              className="absolute inset-0 bg-black"
-            />
-            <motion.div
-              initial={{ opacity: 0, scale: 0.96 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.96 }}
-              className={`relative w-full max-w-md ${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-6 space-y-5 shadow-2xl`}
-            >
-              <div className="space-y-1.5">
-                <h3 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>Confirmar cierre de caja</h3>
-                <p className={`text-xs ${classes.textMuted} font-medium`}>
-                  Se van a cerrar <span className="font-black">{cashPreview.totals.orderCount}</span> pedidos entregados. Una vez cerrados no se pueden modificar.
-                </p>
-              </div>
-
-              <div className={`${classes.inputBg} border ${classes.borderCard} ${classes.radiusCard} p-4 text-center`}>
-                <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>Total a cerrar</span>
-                <span className="text-2xl font-black text-amber-500">{formatPrice(cashPreview.totals.totalRevenue)}</span>
-              </div>
-
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setConfirmCashClose(false)}
-                  disabled={isClosingCash}
-                  className={`flex-1 px-4 py-3 ${classes.radiusBtn} ${classes.inputBg} border ${classes.borderCard} ${classes.textSecondary} text-xs font-black uppercase tracking-widest cursor-pointer`}
-                >
-                  Cancelar
-                </button>
-                <button
-                  id="btn-confirm-cash-close"
-                  onClick={handleCashClose}
-                  disabled={isClosingCash}
-                  className={`flex-1 px-4 py-3 ${classes.radiusBtn} bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-black uppercase tracking-widest cursor-pointer disabled:opacity-60 disabled:cursor-wait`}
-                >
-                  {isClosingCash ? 'Cerrando…' : 'Confirmar'}
-                </button>
-              </div>
             </motion.div>
           </div>
         )}
