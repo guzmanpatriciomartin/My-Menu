@@ -77,10 +77,21 @@ export interface CreateOrderInput {
   items: OrderDraftItem[];
 }
 
-// Result of a create attempt. A single shape (rather than a discriminated union)
-// because this project compiles with strictNullChecks OFF, where boolean-discriminant
-// narrowing is unreliable. The endpoint maps each outcome to a status code:
-// ok -> 201, reason 'invalid_table' -> 400, reason 'unavailable_items' -> 409.
+// Firestore rejects `undefined` as a field value outright — the whole write throws with
+// "Unsupported field value: undefined". Our documents are built from interfaces with
+// optional fields (cancellationReason, deliveredAt, note, dinerName…), and an unset
+// optional serializes to exactly that. Without this, a perfectly ordinary order with no
+// cancellation reason could not be saved at all: the write failed, the error was
+// swallowed, memory looked updated, and the next snapshot silently rolled it back.
+// Dropping the key makes "absent" mean absent, which is what Firestore expects.
+function forFirestore<T extends object>(value: T): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, fieldValue] of Object.entries(value)) {
+    if (fieldValue !== undefined) out[key] = fieldValue;
+  }
+  return out;
+}
+
 // Same optional-field result shape used across this store (the project compiles with
 // strictNullChecks off, so discriminated unions do not narrow on a boolean).
 export interface CashCloseResult {
@@ -104,6 +115,10 @@ export interface CashCloseActor {
   role: UserRole;
 }
 
+// Result of a create attempt. A single shape (rather than a discriminated union)
+// because this project compiles with strictNullChecks OFF, where boolean-discriminant
+// narrowing is unreliable. The endpoint maps each outcome to a status code:
+// ok -> 201, reason 'invalid_table' -> 400, reason 'unavailable_items' -> 409.
 export interface CreateOrderResult {
   ok: boolean;
   order?: Order;
@@ -435,7 +450,7 @@ class Store {
     };
 
     try {
-      await setDoc(doc(db, 'orders', newOrder.id), newOrder);
+      await setDoc(doc(db, 'orders', newOrder.id), forFirestore(newOrder));
     } catch (err) {
       console.error('[Firestore] Order save error, persisting in memory:', err);
     }
@@ -473,7 +488,7 @@ class Store {
     };
 
     try {
-      await setDoc(doc(db, 'orders', updated.id), updated);
+      await setDoc(doc(db, 'orders', updated.id), forFirestore(updated));
     } catch (e) {
       console.error('[Firestore] Order status write error:', e);
     }
@@ -495,7 +510,7 @@ class Store {
     }
 
     try {
-      await setDoc(doc(db, 'menuItems', item.id), item);
+      await setDoc(doc(db, 'menuItems', item.id), forFirestore(item));
     } catch (e) {
       console.error('[Firestore] saveMenuItem error:', e);
     }
@@ -537,7 +552,7 @@ class Store {
     }
 
     try {
-      await setDoc(doc(db, 'categories', category.id), category);
+      await setDoc(doc(db, 'categories', category.id), forFirestore(category));
     } catch (e) {
       console.error('[Firestore] saveCategory error:', e);
     }
@@ -593,7 +608,7 @@ class Store {
     }
 
     try {
-      await setDoc(doc(db, 'tables', table.id), table);
+      await setDoc(doc(db, 'tables', table.id), forFirestore(table));
     } catch (e) {
       console.error('[Firestore] saveTable error:', e);
     }
@@ -652,7 +667,7 @@ class Store {
     };
 
     try {
-      await setDoc(doc(db, 'tableCalls', newCall.id), newCall);
+      await setDoc(doc(db, 'tableCalls', newCall.id), forFirestore(newCall));
     } catch (e) {
       console.error('[Firestore] createTableCall error:', e);
     }
@@ -673,7 +688,7 @@ class Store {
 
     const updated: TableCall = { ...this.tableCalls[index], status };
     try {
-      await setDoc(doc(db, 'tableCalls', updated.id), updated);
+      await setDoc(doc(db, 'tableCalls', updated.id), forFirestore(updated));
     } catch (e) {
       console.error('[Firestore] updateTableCallStatus error:', e);
     }
@@ -834,9 +849,9 @@ class Store {
       const batch = writeBatch(db);
       // The close document goes in the first chunk so it lands together with the bulk
       // of the stamps.
-      if (i === 0) batch.set(doc(db, 'cashCloses', close.id), { ...close });
+      if (i === 0) batch.set(doc(db, 'cashCloses', close.id), forFirestore(close));
       for (const order of chunks[i]) {
-        batch.set(doc(db, 'orders', order.id), { ...order, cashCloseId: close.id });
+        batch.set(doc(db, 'orders', order.id), forFirestore({ ...order, cashCloseId: close.id }));
       }
       await batch.commit();
     }
