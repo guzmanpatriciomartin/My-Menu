@@ -20,6 +20,13 @@ service cloud.firestore {
     match /tableCalls/{docId} {
       allow read, write: if true;
     }
+    // Cash closes are accounting records. They follow the same open-access decision as
+    // the rest of the database (see SECURITY_BACKLOG.md): the backend reaches Firestore
+    // with the client SDK, so it is subject to these rules and cannot write if they are
+    // closed. Anything financial makes tightening this more urgent, not less.
+    match /cashCloses/{docId} {
+      allow read, write: if true;
+    }
   }
 }
 
