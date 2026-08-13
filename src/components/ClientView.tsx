@@ -447,12 +447,18 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
           }
         })();
 
-        // No stamp means this session predates the fix; treat the close as already
-        // consumed and stamp now, so an old close cannot loop the UI.
+        // No stamp: a session that predates this stamping logic. If it still holds data,
+        // that data belongs to whoever sat here before the table was closed, so wipe it
+        // once. This does not loop — the wipe stops the poll, and entering a name writes
+        // a fresh stamp. With nothing to wipe we just stamp and carry on.
         if (!startedAt) {
-          try {
-            localStorage.setItem(sessionStartKey, new Date().toISOString());
-          } catch (err) {}
+          if (dinerName || sessionOrderIds.length > 0) {
+            handleEndClientSession();
+          } else {
+            try {
+              localStorage.setItem(sessionStartKey, new Date().toISOString());
+            } catch (err) {}
+          }
           return;
         }
 
@@ -464,9 +470,12 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
       }
     };
 
+    // Run once immediately: waiting 4s means the previous diner's history is visible for
+    // those seconds, which is exactly what we are trying to avoid.
+    checkSessionStatus();
     const interval = setInterval(checkSessionStatus, 4000);
     return () => clearInterval(interval);
-  }, [establishmentId, tableId, sessionEnded]);
+  }, [establishmentId, tableId, sessionEnded, dinerName, sessionOrderIds.length]);
 
   // Send table call to waiter / request bill
   const handleSendTableCall = async (type: 'waiter_call' | 'bill_request') => {
