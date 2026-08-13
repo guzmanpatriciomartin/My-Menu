@@ -185,10 +185,14 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
         return;
       }
       try {
-        const res = await fetch(`/api/establishments/${establishmentId}/orders`);
-        const allOrders: Order[] = await res.json();
-        // Filter those belonging to this session
-        const matchingOrders = allOrders.filter(o => sessionOrderIds.includes(o.id));
+        // F-4: scoped lookup — we only ask for OUR own order ids on OUR table.
+        // The server never enumerates other diners' orders.
+        const res = await fetch(`/api/establishments/${establishmentId}/orders/lookup`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tableId, orderIds: sessionOrderIds }),
+        });
+        const matchingOrders: Order[] = await res.json();
         // Sort newest first
         matchingOrders.sort((a,b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
         setActiveOrders(matchingOrders);
@@ -198,18 +202,22 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
     };
 
     fetchSessionOrders();
-    
+
     // Set up short polling (fallback in case socket closed or SSE delayed, giving absolute guarantee)
     const interval = setInterval(fetchSessionOrders, 4000);
     return () => clearInterval(interval);
-  }, [sessionOrderIds, establishmentId]);
+  }, [sessionOrderIds, establishmentId, tableId]);
 
   // Connect to SSE for instant real-time status updates (RF-C08)
   useEffect(() => {
     let sse: EventSource | null = null;
     try {
-      sse = new EventSource('/api/realtime');
-      
+      // F-6: identify as a diner for THIS establishment + table. The server only
+      // streams us MENU_CHANGED and status changes for our own table.
+      sse = new EventSource(
+        `/api/realtime?establishmentId=${encodeURIComponent(establishmentId)}&tableId=${encodeURIComponent(tableId)}`
+      );
+
       sse.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
@@ -241,7 +249,7 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
     return () => {
       if (sse) sse.close();
     };
-  }, [sessionOrderIds, establishmentId]);
+  }, [sessionOrderIds, establishmentId, tableId]);
 
   // Solve correct table name
   const tableName = useMemo(() => {
@@ -324,30 +332,30 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
     setOrderSubmitting(true);
 
     try {
-      const orderItems: OrderItem[] = cart.map(c => ({
-        id: 'orditem-' + Math.random().toString(36).substring(2, 9),
+      // F-3: send only menuItemId + quantity + comment. The server recomputes
+      // name/price from the catalog and rejects unavailable items, so we never trust
+      // client-side prices.
+      const items = cart.map(c => ({
         menuItemId: c.item.id,
-        name: c.item.name,
-        price: c.item.price,
         quantity: c.quantity,
         comment: c.comment.trim() || undefined
       }));
 
-      const payload = {
-        establishmentId,
-        tableId,
-        tableName,
-        items: orderItems,
-        status: 'Recibido' as OrderStatus
-      };
-
-      const res = await fetch('/api/orders', {
+      const res = await fetch(`/api/establishments/${establishmentId}/orders`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({ tableId, items })
       });
+
+      if (res.status === 409) {
+        // Some items became unavailable between browsing and checkout.
+        await res.json().catch(() => null);
+        alert('Algunos ítems ya no están disponibles. Actualizamos el menú, revisá tu pedido.');
+        loadData();
+        return;
+      }
 
       if (!res.ok) throw new Error('Failed to create order');
       const orderObj: Order = await res.json();

@@ -9,3 +9,10 @@ coverage/
 
 # Runtime JSON datastore (contains order data / customer comments)
 db_temp.json
+
+# Firebase service-account keys — NEVER commit these
+*serviceaccount*.json
+service-account*.json
+service_account*.json
+*-firebase-adminsdk-*.json
+firebase-service-account*.json
