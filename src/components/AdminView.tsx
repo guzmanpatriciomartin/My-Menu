@@ -51,6 +51,7 @@ import {
 import { playNewOrderSound, playAlertSound } from './SoundUtility';
 import { useTheme } from '../theme/ThemeContext';
 import ThemeTriggerButton from './ThemeTriggerButton';
+import MetricsDashboard from './MetricsDashboard';
 
 interface AdminViewProps {
   onBackToLauncher: () => void;
@@ -584,24 +585,23 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   // Check table occupancy (active orders in current session or pending calls)
   const getTableOccupancy = (tableId: string) => {
     const tableObj = tables.find(t => t.id === tableId);
-    if (tableObj && typeof tableObj.isOccupied === 'boolean') {
-      return {
-        isOccupied: tableObj.isOccupied,
-        activeOrdersCount: tableObj.activeOrdersCount || 0,
-        pendingCallsCount: tableCalls.filter(c => c.tableId === tableId && c.status === 'pending').length
-      };
-    }
     const lastClosedAtMs = tableObj?.lastClosedAt ? new Date(tableObj.lastClosedAt).getTime() : 0;
+    
+    // An active session order is one for this table, not cancelled, not frozen by cash-close,
+    // and placed AFTER the table was last closed.
     const tableOrders = orders.filter(
-      (o) => o.tableId === tableId && o.status !== 'Cancelado' && new Date(o.createdAt).getTime() > lastClosedAtMs
+      (o) => o.tableId === tableId && o.status !== 'Cancelado' && !o.cashCloseId && (lastClosedAtMs === 0 || new Date(o.createdAt).getTime() > lastClosedAtMs)
     );
     const tableCallsPending = tableCalls.filter(
       (c) => c.tableId === tableId && c.status === 'pending'
     );
-    const isOccupied = tableOrders.length > 0 || tableCallsPending.length > 0;
+    const isOccupied = typeof tableObj?.isOccupied === 'boolean' 
+      ? tableObj.isOccupied 
+      : (tableOrders.length > 0 || tableCallsPending.length > 0);
+
     return {
       isOccupied,
-      activeOrdersCount: tableOrders.length,
+      activeOrdersCount: tableObj?.activeOrdersCount !== undefined ? tableObj.activeOrdersCount : tableOrders.length,
       pendingCallsCount: tableCallsPending.length
     };
   };
@@ -2034,131 +2034,16 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
 
           {/* TAB: Metrics — admin only (the endpoint also enforces it). */}
           {activeTab === 'metricas' && currentUser.role === 'admin' && (
-            <div className="space-y-6">
-              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 flex flex-wrap items-center justify-between gap-4`}>
-                <div className="space-y-1">
-                  <h2 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>Métricas de Venta</h2>
-                  <p className={`text-xs ${classes.textMuted} font-medium`}>Solo pedidos entregados. Horarios en hora local.</p>
-                </div>
-                <input
-                  id="metrics-day"
-                  type="date"
-                  value={metricsDay}
-                  onChange={(e) => { setMetricsDay(e.target.value); fetchMetrics(e.target.value); }}
-                  className={`px-3 py-2 ${classes.inputBg} border ${classes.borderCard} ${classes.radiusBtn} ${classes.textPrimary} text-xs font-mono`}
-                />
-              </div>
-
-              {metricsLoading && !metrics ? (
-                <p className={`text-xs ${classes.textMuted} font-mono`}>Cargando…</p>
-              ) : metrics && (
-                <>
-                  {/* KPIs */}
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                    <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 space-y-1`}>
-                      <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>Recaudación</span>
-                      <span id="metrics-revenue" className="text-2xl font-black text-amber-500 block">{formatPrice(metrics.totals.totalRevenue)}</span>
-                      <div className="flex gap-3 pt-1 flex-wrap">
-                        {/* null means "no history to compare", which is different from 0 */}
-                        <span className={`text-[10px] font-mono ${classes.textMuted}`}>
-                          vs ayer:{' '}
-                          {metrics.comparison.vsYesterday?.pct == null ? (
-                            <span className={classes.textMuted}>sin datos</span>
-                          ) : (
-                            <span className={metrics.comparison.vsYesterday.pct >= 0 ? 'text-emerald-400 font-black' : 'text-rose-400 font-black'}>
-                              {metrics.comparison.vsYesterday.pct >= 0 ? '+' : ''}{metrics.comparison.vsYesterday.pct.toFixed(0)}%
-                            </span>
-                          )}
-                        </span>
-                        <span className={`text-[10px] font-mono ${classes.textMuted}`}>
-                          vs prom. 7d:{' '}
-                          {metrics.comparison.vsWeekAvg?.pct == null ? (
-                            <span className={classes.textMuted}>sin datos</span>
-                          ) : (
-                            <span className={metrics.comparison.vsWeekAvg.pct >= 0 ? 'text-emerald-400 font-black' : 'text-rose-400 font-black'}>
-                              {metrics.comparison.vsWeekAvg.pct >= 0 ? '+' : ''}{metrics.comparison.vsWeekAvg.pct.toFixed(0)}%
-                            </span>
-                          )}
-                        </span>
-                      </div>
-                    </div>
-                    <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 space-y-1`}>
-                      <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>Pedidos</span>
-                      <span className={`text-2xl font-black ${classes.textPrimary} block`}>{metrics.totals.orderCount}</span>
-                    </div>
-                    <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 space-y-1`}>
-                      <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>Ticket promedio</span>
-                      <span className={`text-2xl font-black ${classes.textPrimary} block`}>{formatPrice(metrics.totals.averageTicket)}</span>
-                    </div>
-                  </div>
-
-                  {/* Sales by hour */}
-                  <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 space-y-3`}>
-                    <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>Ventas por hora</span>
-                    {(() => {
-                      const peak = Math.max(...metrics.byHour.map((h) => h.revenue), 1);
-                      return (
-                        <div className="flex items-end gap-0.5 h-28">
-                          {metrics.byHour.map((h) => (
-                            <div key={h.hour} className="flex-1 flex flex-col items-center justify-end h-full group" title={`${h.hour}:00 — ${formatPrice(h.revenue)} (${h.orderCount})`}>
-                              <div
-                                className={`w-full ${h.revenue > 0 ? 'bg-amber-500' : classes.inputBg} rounded-sm transition-all group-hover:bg-amber-400`}
-                                style={{ height: `${Math.max((h.revenue / peak) * 100, h.revenue > 0 ? 4 : 2)}%` }}
-                              />
-                              {h.hour % 6 === 0 && (
-                                <span className={`text-[8px] ${classes.textMuted} font-mono mt-1`}>{h.hour}</span>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      );
-                    })()}
-                  </div>
-
-                  {/* Top products & by table */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} overflow-hidden`}>
-                      <div className={`p-4 ${classes.bgHeader} border-b ${classes.borderCard} font-mono text-[9px] ${classes.textMuted} tracking-widest uppercase font-black`}>
-                        Más vendidos
-                      </div>
-                      {metrics.topProducts.length === 0 ? (
-                        <p className={`p-4 text-xs ${classes.textMuted}`}>Sin ventas en el día.</p>
-                      ) : (
-                        <div className={`divide-y ${classes.borderCard}`}>
-                          {metrics.topProducts.slice(0, 8).map((p) => (
-                            <div key={p.menuItemId} className="p-3 flex items-center justify-between gap-2">
-                              <span className={`text-xs ${classes.textSecondary} truncate`}>{p.name}</span>
-                              <span className="text-[10px] font-mono shrink-0">
-                                <span className={`font-black ${classes.textPrimary}`}>{p.units}u</span>
-                                <span className={`${classes.textMuted}`}> · {formatPrice(p.revenue)}</span>
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} overflow-hidden`}>
-                      <div className={`p-4 ${classes.bgHeader} border-b ${classes.borderCard} font-mono text-[9px] ${classes.textMuted} tracking-widest uppercase font-black`}>
-                        Por mesa
-                      </div>
-                      {metrics.byTable.length === 0 ? (
-                        <p className={`p-4 text-xs ${classes.textMuted}`}>Sin ventas en el día.</p>
-                      ) : (
-                        <div className={`divide-y ${classes.borderCard}`}>
-                          {metrics.byTable.map((t) => (
-                            <div key={t.tableId} className="p-3 flex items-center justify-between gap-2">
-                              <span className={`text-xs ${classes.textSecondary}`}>{t.tableName} <span className={classes.textMuted}>({t.orderCount})</span></span>
-                              <span className={`text-[10px] font-mono font-black ${classes.textPrimary}`}>{formatPrice(t.revenue)}</span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
+            <MetricsDashboard
+              metrics={metrics}
+              metricsDay={metricsDay}
+              onDayChange={(newDay) => {
+                setMetricsDay(newDay);
+                fetchMetrics(newDay);
+              }}
+              loading={metricsLoading}
+              formatPrice={formatPrice}
+            />
           )}
 
           {activeTab === 'historial' && (

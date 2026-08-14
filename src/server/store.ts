@@ -376,15 +376,18 @@ class Store {
     return Array.from(map.values()).map((table) => {
       const sessionKey = `${establishmentId}_${table.id}`;
       const closed = this.closedSessions.get(sessionKey);
-      const closedAtMs = closed ? new Date(closed.closedAt).getTime() : 0;
+      const closedAtStr = table.lastClosedAt || closed?.closedAt;
+      const closedAtMs = closedAtStr ? new Date(closedAtStr).getTime() : 0;
 
-      const sessionOrders = this.data.orders.filter(
-        (o) =>
-          o.establishmentId === establishmentId &&
-          o.tableId === table.id &&
-          o.status !== 'Cancelado' &&
-          new Date(o.createdAt).getTime() > closedAtMs
-      );
+      // Active session orders: must belong to this table, not cancelled, not archived in cash close,
+      // and created strictly after the last closed timestamp.
+      const sessionOrders = this.data.orders.filter((o) => {
+        if (o.establishmentId !== establishmentId || o.tableId !== table.id) return false;
+        if (o.status === 'Cancelado') return false;
+        if (o.cashCloseId) return false;
+        if (closedAtMs > 0 && new Date(o.createdAt).getTime() <= closedAtMs) return false;
+        return true;
+      });
 
       const pendingCalls = this.tableCalls.filter(
         (c) =>
@@ -399,7 +402,7 @@ class Store {
         ...table,
         isOccupied,
         activeOrdersCount: sessionOrders.length,
-        lastClosedAt: closed?.closedAt,
+        lastClosedAt: closedAtStr,
       };
     });
   }
@@ -415,9 +418,11 @@ class Store {
   // Scoped diner lookup (F-4): only orders that belong to the given tenant AND table
   // AND whose id was explicitly presented by the caller AND created during current open session.
   public lookupOrders(establishmentId: string, tableId: string, orderIds: string[]): Order[] {
+    const table = this.data.tables.find((t) => t.id === tableId && t.establishmentId === establishmentId);
     const sessionKey = `${establishmentId}_${tableId}`;
     const closed = this.closedSessions.get(sessionKey);
-    const closedAtMs = closed ? new Date(closed.closedAt).getTime() : 0;
+    const closedAtStr = table?.lastClosedAt || closed?.closedAt;
+    const closedAtMs = closedAtStr ? new Date(closedAtStr).getTime() : 0;
     const idSet = new Set(orderIds);
 
     return this.data.orders.filter(
@@ -425,7 +430,8 @@ class Store {
         o.establishmentId === establishmentId &&
         o.tableId === tableId &&
         idSet.has(o.id) &&
-        new Date(o.createdAt).getTime() > closedAtMs
+        !o.cashCloseId &&
+        (closedAtMs === 0 || new Date(o.createdAt).getTime() > closedAtMs)
     );
   }
 
@@ -810,48 +816,55 @@ class Store {
     return updatedTarget;
   }
 
-  // Close Table Session (Admin Action)
+  // Close Table Session (Admin / Staff Action)
   public async closeTableSession(
     establishmentId: string,
     tableId: string
   ): Promise<{ ok: boolean; closedAt?: string; ordersClosedCount?: number; reason?: string; error?: string }> {
-    const table = this.data.tables.find(
+    const tableIndex = this.data.tables.findIndex(
       (t) => t.id === tableId && t.establishmentId === establishmentId
     );
-    if (!table) {
+    if (tableIndex === -1) {
       return { ok: false, reason: 'table_not_found', error: 'Mesa no encontrada' };
     }
 
+    const table = this.data.tables[tableIndex];
     const sessionKey = `${establishmentId}_${tableId}`;
     const closed = this.closedSessions.get(sessionKey);
-    const closedAtMs = closed ? new Date(closed.closedAt).getTime() : 0;
+    const closedAtStr = table.lastClosedAt || closed?.closedAt;
+    const closedAtMs = closedAtStr ? new Date(closedAtStr).getTime() : 0;
 
-    // Session orders that belong to the open session (created after previous closedAt)
+    // Session orders that belong to the open session (created after previous closedAt and not archived in cash close)
     const currentSessionOrders = this.data.orders.filter(
       (o) =>
         o.establishmentId === establishmentId &&
         o.tableId === tableId &&
         o.status !== 'Cancelado' &&
-        new Date(o.createdAt).getTime() > closedAtMs
+        !o.cashCloseId &&
+        (closedAtMs === 0 || new Date(o.createdAt).getTime() > closedAtMs)
     );
 
     const pendingCalls = this.tableCalls.filter(
       (c) => c.establishmentId === establishmentId && c.tableId === tableId && c.status === 'pending'
     );
 
-    const isOccupied = currentSessionOrders.length > 0 || pendingCalls.length > 0;
-
-    // Reject closing if table is already closed / has no active orders or calls in this session
-    if (!isOccupied) {
-      return {
-        ok: false,
-        reason: 'table_already_closed',
-        error: `La mesa "${table.name}" ya se encuentra cerrada / libre.`,
-      };
-    }
-
     const closedAt = new Date().toISOString();
     this.closedSessions.set(sessionKey, { closedAt, timestamp: Date.now() });
+
+    // Update table in-memory and in Firestore
+    const updatedTable: Table = {
+      ...table,
+      lastClosedAt: closedAt,
+      isOccupied: false,
+      activeOrdersCount: 0,
+    };
+    this.data.tables[tableIndex] = updatedTable;
+
+    try {
+      await setDoc(doc(db, 'tables', table.id), forFirestore(updatedTable), { merge: true });
+    } catch (e) {
+      console.error('[Firestore] closeTableSession table update error:', e);
+    }
 
     // 1. Mark all active non-finalized orders for this table as 'Entregado' so they are archived as delivered sales
     let ordersClosedCount = 0;
@@ -875,15 +888,15 @@ class Store {
   }
 
   public clearTableSession(establishmentId: string, tableId: string): void {
-    const sessionKey = `${establishmentId}_${tableId}`;
-    this.closedSessions.delete(sessionKey);
+    // Keep lastClosedAt in place to prevent resurrection of historical orders.
   }
 
   public getTableSessionStatus(establishmentId: string, tableId: string): { closedAt?: string } {
     this.purgeOldSessions();
+    const table = this.data.tables.find((t) => t.id === tableId && t.establishmentId === establishmentId);
     const sessionKey = `${establishmentId}_${tableId}`;
     const entry = this.closedSessions.get(sessionKey);
-    return { closedAt: entry?.closedAt };
+    return { closedAt: table?.lastClosedAt || entry?.closedAt };
   }
 
   private purgeOldSessions(): void {
