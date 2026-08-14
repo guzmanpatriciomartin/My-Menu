@@ -10,7 +10,15 @@ import {
   limit,
   writeBatch
 } from 'firebase/firestore';
-import { initialEstablishments, initialCategories, initialMenuItems, initialTables } from '../db/seedData';
+import {
+  initialEstablishments,
+  initialCategories,
+  initialMenuItems,
+  initialTables,
+  generateSeedOrders,
+  generateSeedTableCalls,
+  generateSeedCashCloses,
+} from '../db/seedData';
 import {
   Establishment,
   Category,
@@ -137,58 +145,17 @@ interface NotifyPayload {
   order?: Order;
 }
 
-const initialOrders: Order[] = [
-  {
-    id: 'ord-pre-1',
-    establishmentId: 'bodegon-palermo',
-    tableId: 'tab-pal-1',
-    tableName: 'Mesa 1',
-    items: [
-      { id: 'oi-1', menuItemId: 'item-palermo-empanada', name: 'Empanada de Carne Cortada a Cuchillo', price: 1300, quantity: 3, comment: 'Bien jugosas, por favor!' },
-      { id: 'oi-2', menuItemId: 'item-palermo-mila-napo', name: 'Milanesa de Ternera a la Napolitana', price: 9800, quantity: 1, comment: 'Para compartir entre dos.' },
-    ],
-    status: 'Recibido',
-    createdAt: new Date(Date.now() - 15 * 60 * 1000).toISOString(),
-    updatedAt: new Date(Date.now() - 15 * 60 * 1000).toISOString(),
-    paymentStatus: null,
-  },
-  {
-    id: 'ord-pre-2',
-    establishmentId: 'bodegon-palermo',
-    tableId: 'tab-pal-3',
-    tableName: 'Mesa 3',
-    items: [
-      { id: 'oi-3', menuItemId: 'item-palermo-provoleta', name: 'Provoleta Clásica al Hierro', price: 4500, quantity: 1, comment: 'Bien doradita' },
-      { id: 'oi-4', menuItemId: 'item-palermo-ipa', name: 'Cerveza Tirada IPA (Pinta)', price: 2500, quantity: 2 },
-    ],
-    status: 'En preparación',
-    createdAt: new Date(Date.now() - 32 * 60 * 1000).toISOString(),
-    updatedAt: new Date(Date.now() - 25 * 60 * 1000).toISOString(),
-    paymentStatus: null,
-  },
-  {
-    id: 'ord-pre-3',
-    establishmentId: 'cafe-speakeasy',
-    tableId: 'tab-caf-1',
-    tableName: 'Mesa A1',
-    items: [
-      { id: 'oi-5', menuItemId: 'item-cafe-flatwhite', name: 'Avocado Flat White', price: 2100, quantity: 1 },
-      { id: 'oi-6', menuItemId: 'item-cafe-croissant', name: 'Croissant Hojaldrado de Pistachos', price: 2500, quantity: 1, comment: 'Calentar 30 segundos' },
-    ],
-    status: 'Listo',
-    createdAt: new Date(Date.now() - 12 * 60 * 1000).toISOString(),
-    updatedAt: new Date(Date.now() - 4 * 60 * 1000).toISOString(),
-    paymentStatus: null,
-  },
-];
-
-const SEED_COLLECTIONS: Array<{ name: string; items: Array<{ id: string }> }> = [
-  { name: 'establishments', items: initialEstablishments },
-  { name: 'categories', items: initialCategories },
-  { name: 'menuItems', items: initialMenuItems },
-  { name: 'tables', items: initialTables },
-  { name: 'orders', items: initialOrders },
-];
+function getSeedCollections(): Array<{ name: string; items: Array<{ id: string }> }> {
+  return [
+    { name: 'establishments', items: initialEstablishments },
+    { name: 'categories', items: initialCategories },
+    { name: 'menuItems', items: initialMenuItems },
+    { name: 'tables', items: initialTables },
+    { name: 'orders', items: generateSeedOrders() },
+    { name: 'tableCalls', items: generateSeedTableCalls() },
+    { name: 'cashCloses', items: generateSeedCashCloses() },
+  ];
+}
 
 class Store {
   // In-memory projection of Firestore. Reads (getters) are served synchronously from
@@ -199,12 +166,12 @@ class Store {
     categories: initialCategories,
     menuItems: initialMenuItems,
     tables: initialTables,
-    orders: initialOrders,
+    orders: generateSeedOrders(),
   };
 
   private sseClients: SseClient[] = [];
-  private tableCalls: TableCall[] = [];
-  private cashCloses: CashClose[] = [];
+  private tableCalls: TableCall[] = generateSeedTableCalls();
+  private cashCloses: CashClose[] = generateSeedCashCloses();
   private closedSessions: Map<string, string> = new Map();
 
   // Serializes cash closes per tenant: two waiters hitting "Cerrar caja" at the same
@@ -320,7 +287,8 @@ class Store {
   // Writes initial demo data ONLY into collections that are currently empty. Safe to
   // run on every boot: it never touches a collection that already has documents.
   private async seedIfEmpty() {
-    for (const { name, items } of SEED_COLLECTIONS) {
+    const seedCols = getSeedCollections();
+    for (const { name, items } of seedCols) {
       const snap = await getDocs(query(collection(db, name), limit(1)));
 
       // An offline read is served from the local cache, which starts out empty — so
@@ -338,11 +306,14 @@ class Store {
 
       if (snap.empty) {
         console.log(`[Firestore] Seeding empty collection "${name}"...`);
-        const batch = writeBatch(db);
-        for (const item of items) {
-          batch.set(doc(db, name, item.id), forFirestore(item));
+        for (let i = 0; i < items.length; i += 400) {
+          const batch = writeBatch(db);
+          const chunk = items.slice(i, i + 400);
+          for (const item of chunk) {
+            batch.set(doc(db, name, item.id), forFirestore(item));
+          }
+          await batch.commit();
         }
-        await batch.commit();
       }
     }
   }
@@ -352,20 +323,26 @@ class Store {
   // clients pick up the refreshed data via their normal polling.
   public async seedAllDemoData(): Promise<boolean> {
     console.log('[Firestore] Force-seeding all demo data...');
-    for (const { name, items } of SEED_COLLECTIONS) {
-      const batch = writeBatch(db);
-      for (const item of items) {
-        batch.set(doc(db, name, item.id), forFirestore(item));
+    const seedCols = getSeedCollections();
+    for (const { name, items } of seedCols) {
+      for (let i = 0; i < items.length; i += 400) {
+        const batch = writeBatch(db);
+        const chunk = items.slice(i, i + 400);
+        for (const item of chunk) {
+          batch.set(doc(db, name, item.id), forFirestore(item));
+        }
+        await batch.commit();
       }
-      await batch.commit();
     }
     this.data = {
       establishments: [...initialEstablishments],
       categories: [...initialCategories],
       menuItems: [...initialMenuItems],
       tables: [...initialTables],
-      orders: [...initialOrders],
+      orders: generateSeedOrders(),
     };
+    this.tableCalls = generateSeedTableCalls();
+    this.cashCloses = generateSeedCashCloses();
     console.log('[Firestore] Force-seed complete.');
     return true;
   }
