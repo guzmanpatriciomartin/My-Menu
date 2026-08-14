@@ -119,3 +119,26 @@ export const saveTableSchema = z
   })
   .strict();
 export type SaveTableBody = z.infer<typeof saveTableSchema>;
+
+// --- Cash close & metrics (ADR-005) ---
+export const cashCloseSchema = z
+  .object({
+    note: z.string().max(500).optional(),
+  })
+  .strict();
+export type CashCloseBody = z.infer<typeof cashCloseSchema>;
+
+export const metricsQuerySchema = z
+  .object({
+    day: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/, 'Formato de fecha inválido (YYYY-MM-DD)')
+      .optional(),
+  })
+  .strict();
+
+export const cashClosesQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().min(1).max(100).default(30),
+  })
+  .strict();
