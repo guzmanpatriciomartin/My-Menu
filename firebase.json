@@ -1,0 +1,6 @@
+{
+  "firestore": {
+    "database": "ai-studio-mimenuchecktable-9d36fabc-d3f4-4115-bc99-9e69dcd4eb50",
+    "rules": "firestore.rules"
+  }
+}
