@@ -32,7 +32,9 @@ import {
   BarChart3,
   Printer,
   AlertCircle,
-  Lock
+  Lock,
+  Database,
+  LayoutGrid
 } from 'lucide-react';
 import {
   Establishment,
@@ -52,6 +54,7 @@ import { playNewOrderSound, playAlertSound } from './SoundUtility';
 import { useTheme } from '../theme/ThemeContext';
 import ThemeTriggerButton from './ThemeTriggerButton';
 import MetricsDashboard from './MetricsDashboard';
+import OrdersTable from './OrdersTable';
 import { printKitchenTicket, printTableBill } from '../lib/thermalPrint';
 
 interface AdminViewProps {
@@ -88,6 +91,10 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   const [loading, setLoading] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [activeTab, setActiveTab] = useState<'diseño_mesas' | 'pedidos' | 'menu_items' | 'historial' | 'caja' | 'metricas'>('pedidos');
+
+  // The Pedidos tab has two lenses over the same data: the live kitchen monitor
+  // (cards) and the queryable orders database (table).
+  const [ordersView, setOrdersView] = useState<'monitor' | 'tabla'>('monitor');
 
   // Cash close & open (ADR-005). Preview is what the shift has pending right now; closes is the
   // history. Both are available to waiters — closing the register is shift work.
@@ -1264,13 +1271,51 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               {/* Header metrics card */}
               <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 flex flex-wrap items-center justify-between gap-4`}>
                 <div className="space-y-1 my-0.5">
-                  <h2 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>Monitor de Pedidos Activos</h2>
-                  <p className={`text-xs ${classes.textMuted} font-medium`}>Atención de comandas en tiempo real. Utiliza los controles de avance y cancelación.</p>
+                  <h2 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>
+                    {ordersView === 'monitor' ? 'Monitor de Pedidos Activos' : 'Base de Datos de Pedidos'}
+                  </h2>
+                  <p className={`text-xs ${classes.textMuted} font-medium`}>
+                    {ordersView === 'monitor'
+                      ? 'Atención de comandas en tiempo real. Utiliza los controles de avance y cancelación.'
+                      : 'Navega, busca y filtra el histórico completo de pedidos. Haz clic en una fila para ver el detalle.'}
+                  </p>
                 </div>
-                
-                <div className={`flex items-center gap-2 ${classes.inputBg} px-4 py-2 border ${classes.borderCard} ${classes.radiusCard} font-mono`}>
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                  <span className="text-[10px] font-black text-emerald-400 uppercase tracking-widest">En línea (SSE)</span>
+
+                <div className="flex items-center gap-3">
+                  {/* Lens switch: live monitor vs queryable table */}
+                  <div className={`flex items-center gap-1 ${classes.inputBg} p-1 border ${classes.borderCard} ${classes.radiusBtn}`}>
+                    <button
+                      id="btn-orders-view-monitor"
+                      onClick={() => setOrdersView('monitor')}
+                      className={`px-3 py-1.5 ${classes.radiusBtn} text-[10px] font-black uppercase tracking-widest transition flex items-center gap-1.5 ${
+                        ordersView === 'monitor'
+                          ? 'bg-amber-500 text-zinc-950 shadow-sm'
+                          : `${classes.textMuted} hover:${classes.textPrimary}`
+                      }`}
+                      title="Monitor de comandas en tiempo real"
+                    >
+                      <LayoutGrid className="w-3 h-3" />
+                      Monitor
+                    </button>
+                    <button
+                      id="btn-orders-view-tabla"
+                      onClick={() => setOrdersView('tabla')}
+                      className={`px-3 py-1.5 ${classes.radiusBtn} text-[10px] font-black uppercase tracking-widest transition flex items-center gap-1.5 ${
+                        ordersView === 'tabla'
+                          ? 'bg-amber-500 text-zinc-950 shadow-sm'
+                          : `${classes.textMuted} hover:${classes.textPrimary}`
+                      }`}
+                      title="Base de datos de pedidos"
+                    >
+                      <Database className="w-3 h-3" />
+                      Tabla
+                    </button>
+                  </div>
+
+                  <div className={`flex items-center gap-2 ${classes.inputBg} px-4 py-2 border ${classes.borderCard} ${classes.radiusCard} font-mono`}>
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <span className="text-[10px] font-black text-emerald-400 uppercase tracking-widest">En línea (SSE)</span>
+                  </div>
                 </div>
               </div>
 
@@ -1320,7 +1365,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               )}
 
               {/* Grid of active orders arranged nicely */}
-              {activeOrdersList.length === 0 ? (
+              {ordersView === 'monitor' && (activeOrdersList.length === 0 ? (
                 <div className={`text-center py-24 ${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-6`}>
                   <Bell className={`w-10 h-10 ${classes.textMuted} mx-auto mb-4`} />
                   <h3 className={`text-xs font-black uppercase tracking-wider ${classes.textPrimary} mb-1.5`}>Tranquilidad absoluta</h3>
@@ -1441,6 +1486,16 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     );
                   })}
                 </div>
+              ))}
+
+              {/* Queryable orders database over the full tenant history */}
+              {ordersView === 'tabla' && (
+                <OrdersTable
+                  orders={orders}
+                  tables={tables}
+                  role={currentUser.role}
+                  formatPrice={formatPrice}
+                />
               )}
             </div>
           )}
