@@ -8,6 +8,10 @@
   --font-display: "Space Grotesk", sans-serif;
 }
 
+:root {
+  --primary-color: #f59e0b;
+}
+
 /* Custom Scrollbar removals for horizontal touch sliders */
 .scrollbar-none::-webkit-scrollbar {
   display: none;
@@ -19,6 +23,6 @@
 
 /* Selection aesthetics */
 ::selection {
-  background-color: #f59e0b;
+  background-color: var(--primary-color, #f59e0b);
   color: #090d16;
 }

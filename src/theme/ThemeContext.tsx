@@ -5,7 +5,10 @@ import {
   BorderRadiusPreset, 
   BorderStylePreset, 
   BackdropBlurPreset, 
+  PrimaryColorPreset,
+  PrimaryColorConfig,
   THEME_TEMPLATES, 
+  PRIMARY_COLORS_MAP,
   RADIUS_MAP, 
   BORDER_MAP, 
   BLUR_MAP 
@@ -14,6 +17,7 @@ import {
 interface ThemeConfigState {
   templateId: string;
   mode: ThemeMode;
+  primaryColorOverride: PrimaryColorPreset | null;
   radiusOverride: BorderRadiusPreset | null;
   borderStyleOverride: BorderStylePreset | null;
   blurOverride: BackdropBlurPreset | null;
@@ -24,6 +28,7 @@ const STORAGE_KEY = 'mimenus_theme_template_v1';
 const DEFAULT_STATE: ThemeConfigState = {
   templateId: 'speakeasy-dark',
   mode: 'system',
+  primaryColorOverride: null,
   radiusOverride: null,
   borderStyleOverride: null,
   blurOverride: null
@@ -34,6 +39,8 @@ interface ThemeContextType {
   activeTemplate: ThemeTemplate;
   mode: ThemeMode;
   isDark: boolean;
+  primaryColor: PrimaryColorPreset;
+  primaryColorConfig: PrimaryColorConfig;
   radius: BorderRadiusPreset;
   borderStyle: BorderStylePreset;
   backdropBlur: BackdropBlurPreset;
@@ -46,6 +53,7 @@ interface ThemeContextType {
   };
   setTemplate: (id: string) => void;
   setMode: (mode: ThemeMode) => void;
+  setPrimaryColor: (color: PrimaryColorPreset | null) => void;
   setRadius: (radius: BorderRadiusPreset | null) => void;
   setBorderStyle: (borderStyle: BorderStylePreset | null) => void;
   setBackdropBlur: (blur: BackdropBlurPreset | null) => void;
@@ -82,6 +90,12 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return THEME_TEMPLATES.find(t => t.id === config.templateId) || THEME_TEMPLATES[0];
   }, [config.templateId]);
 
+  // Primary Color config
+  const primaryColor: PrimaryColorPreset = config.primaryColorOverride || activeTemplate.primaryColor || 'amber';
+  const primaryColorConfig = useMemo(() => {
+    return PRIMARY_COLORS_MAP[primaryColor] || PRIMARY_COLORS_MAP.amber;
+  }, [primaryColor]);
+
   // System Dark Mode detection
   const [systemPrefersDark, setSystemPrefersDark] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
@@ -107,7 +121,7 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return activeTemplate.mode === 'dark';
   }, [config.mode, activeTemplate.mode, systemPrefersDark]);
 
-  // Sync HTML document class
+  // Sync HTML document class & Primary Color CSS Variable
   useEffect(() => {
     if (typeof document === 'undefined') return;
     const root = document.documentElement;
@@ -118,7 +132,8 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       root.classList.add('light');
       root.classList.remove('dark');
     }
-  }, [isDark]);
+    root.style.setProperty('--primary-color', primaryColorConfig.hex);
+  }, [isDark, primaryColorConfig]);
 
   // Effective Radius, Border, and Blur
   const radius = config.radiusOverride || activeTemplate.radius;
@@ -172,6 +187,15 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       };
     }
 
+    // Apply dynamic Primary Color overrides
+    baseClasses = {
+      ...baseClasses,
+      textAccent: primaryColorConfig.textAccent,
+      primaryBtn: primaryColorConfig.primaryBtn,
+      badgeAccent: primaryColorConfig.badgeAccent,
+      inputBorder: `${baseClasses.inputBorder.split(' ')[0]} ${primaryColorConfig.inputBorder}`
+    };
+
     return {
       ...baseClasses,
       radiusCard: radiusConfig.card,
@@ -180,7 +204,7 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       borderClass: borderConfig.class,
       blurClass: blurConfig.class
     };
-  }, [activeTemplate, isDark, radius, borderStyle, backdropBlur]);
+  }, [activeTemplate, isDark, radius, borderStyle, backdropBlur, primaryColorConfig]);
 
   const setTemplate = (id: string) => {
     const found = THEME_TEMPLATES.find(t => t.id === id);
@@ -188,6 +212,7 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setConfig(prev => ({
       ...prev,
       templateId: id,
+      primaryColorOverride: null,
       // Default to template's native mode on change if system is not forced
       mode: prev.mode === 'system' ? 'system' : found.mode
     }));
@@ -195,6 +220,10 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const setMode = (mode: ThemeMode) => {
     setConfig(prev => ({ ...prev, mode }));
+  };
+
+  const setPrimaryColor = (primaryColorOverride: PrimaryColorPreset | null) => {
+    setConfig(prev => ({ ...prev, primaryColorOverride }));
   };
 
   const setRadius = (radiusOverride: BorderRadiusPreset | null) => {
@@ -215,6 +244,7 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setConfig({
       templateId: target.id,
       mode: target.mode,
+      primaryColorOverride: null,
       radiusOverride: null,
       borderStyleOverride: null,
       blurOverride: null
@@ -232,12 +262,15 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         activeTemplate,
         mode: config.mode,
         isDark,
+        primaryColor,
+        primaryColorConfig,
         radius,
         borderStyle,
         backdropBlur,
         classes,
         setTemplate,
         setMode,
+        setPrimaryColor,
         setRadius,
         setBorderStyle,
         setBackdropBlur,

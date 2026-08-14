@@ -13,20 +13,21 @@ import {
   Layers, 
   Eye, 
   RotateCcw,
-  Sparkle,
   Square,
   Circle,
-  Maximize2
+  Paintbrush
 } from 'lucide-react';
 import { useTheme } from '../theme/ThemeContext';
 import { 
   THEME_TEMPLATES, 
+  PRIMARY_COLORS_MAP,
   RADIUS_MAP, 
   BORDER_MAP, 
   BLUR_MAP, 
   BorderRadiusPreset, 
   BorderStylePreset, 
   BackdropBlurPreset,
+  PrimaryColorPreset,
   ThemeMode
 } from '../theme/themeConfig';
 
@@ -41,12 +42,15 @@ export default function ThemeSelectorModal({ isOpen, onClose }: ThemeSelectorMod
     activeTemplate, 
     mode, 
     isDark, 
+    primaryColor,
+    primaryColorConfig,
     radius, 
     borderStyle, 
     backdropBlur, 
     classes,
     setTemplate, 
     setMode, 
+    setPrimaryColor,
     setRadius, 
     setBorderStyle, 
     setBackdropBlur, 
@@ -93,7 +97,7 @@ export default function ThemeSelectorModal({ isOpen, onClose }: ThemeSelectorMod
                   </span>
                 </h2>
                 <p className={`text-xs ${classes.textMuted}`}>
-                  Personaliza modos claro/oscuro, suavizados, bordes y efectos de fondo blur
+                  Personaliza color primario, modos claro/oscuro, suavizados, bordes y fondo blur
                 </p>
               </div>
             </div>
@@ -192,6 +196,7 @@ export default function ThemeSelectorModal({ isOpen, onClose }: ThemeSelectorMod
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                   {THEME_TEMPLATES.map((tmpl) => {
                     const isSelected = templateId === tmpl.id;
+                    const tmplPrimaryConfig = PRIMARY_COLORS_MAP[tmpl.primaryColor] || PRIMARY_COLORS_MAP.amber;
                     return (
                       <div
                         key={tmpl.id}
@@ -201,17 +206,17 @@ export default function ThemeSelectorModal({ isOpen, onClose }: ThemeSelectorMod
                             ? 'ring-2 ring-amber-500 border-amber-500 shadow-lg'
                             : `${classes.borderCard} ${classes.bgCardHover}`
                         }`}
-                        style={{ backgroundColor: isSelected ? undefined : undefined }}
                       >
                         {/* Top Badge & Indicators */}
                         <div className="flex items-center justify-between mb-3">
                           <div className="flex items-center space-x-1.5">
                             <span 
-                              className="w-3 h-3 rounded-full border border-white/20 shadow-sm"
-                              style={{ backgroundColor: tmpl.previewAccent }}
+                              className="w-3.5 h-3.5 rounded-full border border-white/20 shadow-sm"
+                              style={{ backgroundColor: tmplPrimaryConfig.hex }}
+                              title={`Color primario: ${tmplPrimaryConfig.name}`}
                             />
                             <span 
-                              className="w-3 h-3 rounded-full border border-white/20 shadow-sm"
+                              className="w-3.5 h-3.5 rounded-full border border-white/20 shadow-sm"
                               style={{ backgroundColor: tmpl.previewBg }}
                             />
                             <span className={`text-[10px] font-mono uppercase px-1.5 py-0.5 rounded ${tmpl.mode === 'dark' ? 'bg-zinc-800 text-zinc-300' : 'bg-stone-200 text-stone-800'}`}>
@@ -220,8 +225,8 @@ export default function ThemeSelectorModal({ isOpen, onClose }: ThemeSelectorMod
                           </div>
 
                           {isSelected && (
-                            <span className="p-1 rounded-full bg-amber-500 text-zinc-950 font-bold">
-                              <Check className="w-3.5 h-3.5" />
+                            <span className={`p-1 rounded-full ${classes.primaryBtn}`}>
+                              <Check className="w-3.5 h-3.5 text-current" />
                             </span>
                           )}
                         </div>
@@ -237,6 +242,9 @@ export default function ThemeSelectorModal({ isOpen, onClose }: ThemeSelectorMod
                         {/* Visual Spec Badges */}
                         <div className="flex flex-wrap gap-1 mt-auto pt-2 border-t border-black/10 dark:border-white/10 text-[10px] font-mono">
                           <span className={`px-1.5 py-0.5 rounded ${classes.badgeMuted}`}>
+                            Color: {tmplPrimaryConfig.name}
+                          </span>
+                          <span className={`px-1.5 py-0.5 rounded ${classes.badgeMuted}`}>
                             Bordes: {RADIUS_MAP[tmpl.radius].label}
                           </span>
                           <span className={`px-1.5 py-0.5 rounded ${classes.badgeMuted}`}>
@@ -250,10 +258,56 @@ export default function ThemeSelectorModal({ isOpen, onClose }: ThemeSelectorMod
               </div>
             )}
 
-            {/* TAB 2: FINE CUSTOMIZATIONS (Bordes, Suavizados, Blur) */}
+            {/* TAB 2: FINE CUSTOMIZATIONS (Color Primario, Bordes, Suavizados, Blur) */}
             {activeTab === 'custom' && (
               <div className="space-y-6">
-                {/* 1. Suavizado de Bordes (Border Radius) */}
+                {/* 1. Color Primario (Primary Color Palette) */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <label className={`text-xs font-bold font-mono uppercase tracking-wider ${classes.textPrimary} flex items-center gap-2`}>
+                      <Paintbrush className="w-4 h-4 text-amber-500" /> Color Primario & Acentos (Primary Color)
+                    </label>
+                    <span className={`text-xs font-mono font-bold ${classes.textAccent}`}>
+                      Actual: {primaryColorConfig.name} ({primaryColorConfig.hex})
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+                    {(Object.keys(PRIMARY_COLORS_MAP) as PrimaryColorPreset[]).map((cKey) => {
+                      const cItem = PRIMARY_COLORS_MAP[cKey];
+                      const isSelected = primaryColor === cKey;
+                      return (
+                        <button
+                          key={cKey}
+                          type="button"
+                          onClick={() => setPrimaryColor(cKey)}
+                          className={`p-3 text-left transition cursor-pointer flex flex-col justify-between ${classes.radiusCard} border ${
+                            isSelected
+                              ? 'border-amber-500 bg-amber-500/10 ring-2 ring-amber-500/80 shadow-md'
+                              : `${classes.borderCard} ${classes.inputBg} hover:border-zinc-500`
+                          }`}
+                        >
+                          <div className="flex items-center justify-between mb-2">
+                            <span 
+                              className="w-5 h-5 rounded-full border border-black/20 dark:border-white/30 shadow-inner flex items-center justify-center shrink-0"
+                              style={{ backgroundColor: cItem.hex }}
+                            >
+                              {isSelected && <Check className="w-3 h-3 text-white drop-shadow" />}
+                            </span>
+                            <span className={`text-[10px] font-mono ${isSelected ? 'font-bold text-amber-500' : classes.textMuted}`}>
+                              {cItem.hex}
+                            </span>
+                          </div>
+                          <span className={`text-xs font-bold truncate ${isSelected ? classes.textAccent : classes.textPrimary}`}>
+                            {cItem.name}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 2. Suavizado de Bordes (Border Radius) */}
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <label className={`text-xs font-bold font-mono uppercase tracking-wider ${classes.textPrimary} flex items-center gap-2`}>
@@ -294,7 +348,7 @@ export default function ThemeSelectorModal({ isOpen, onClose }: ThemeSelectorMod
                   </div>
                 </div>
 
-                {/* 2. Estilo de Bordes */}
+                {/* 3. Estilo de Bordes */}
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <label className={`text-xs font-bold font-mono uppercase tracking-wider ${classes.textPrimary} flex items-center gap-2`}>
@@ -335,7 +389,7 @@ export default function ThemeSelectorModal({ isOpen, onClose }: ThemeSelectorMod
                   </div>
                 </div>
 
-                {/* 3. Fondo Blur & Vidrio Esmerilado */}
+                {/* 4. Fondo Blur & Vidrio Esmerilado */}
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <label className={`text-xs font-bold font-mono uppercase tracking-wider ${classes.textPrimary} flex items-center gap-2`}>
@@ -397,7 +451,10 @@ export default function ThemeSelectorModal({ isOpen, onClose }: ThemeSelectorMod
               <div className={`relative p-5 overflow-hidden transition-all duration-300 ${classes.bgApp} ${classes.radiusCard} border ${classes.borderCard} ${classes.blurClass}`}>
                 <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                   <div className="flex items-center space-x-3">
-                    <div className={`w-14 h-14 ${classes.radiusCard} bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center text-white font-bold text-xl shadow-md`}>
+                    <div 
+                      className={`w-14 h-14 ${classes.radiusCard} flex items-center justify-center text-white font-bold text-xl shadow-md`}
+                      style={{ backgroundColor: primaryColorConfig.hex }}
+                    >
                       ☕
                     </div>
                     <div>
@@ -439,7 +496,7 @@ export default function ThemeSelectorModal({ isOpen, onClose }: ThemeSelectorMod
               <span className={classes.textMuted}>Tema Activo: </span>
               <span className={`font-bold ${classes.textPrimary}`}>{activeTemplate.name}</span>
               <span className={`ml-2 text-[10px] ${classes.textMuted}`}>
-                ({isDark ? 'Modo Oscuro' : 'Modo Claro'}, Radio {RADIUS_MAP[radius].label})
+                ({isDark ? 'Oscuro' : 'Claro'}, Color: {primaryColorConfig.name}, Radio {RADIUS_MAP[radius].label})
               </span>
             </div>
 

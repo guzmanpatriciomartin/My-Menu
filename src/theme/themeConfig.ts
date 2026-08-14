@@ -2,12 +2,38 @@ export type ThemeMode = 'dark' | 'light' | 'system';
 export type BorderRadiusPreset = 'sharp' | 'soft' | 'curved' | 'ultra';
 export type BorderStylePreset = 'subtle' | 'glass' | 'bold' | 'glow';
 export type BackdropBlurPreset = 'none' | 'subtle' | 'glass' | 'deep';
+export type PrimaryColorPreset = 
+  | 'amber' 
+  | 'orange' 
+  | 'emerald' 
+  | 'cyan' 
+  | 'blue' 
+  | 'indigo' 
+  | 'purple' 
+  | 'rose' 
+  | 'red' 
+  | 'zinc';
+
+export interface PrimaryColorConfig {
+  id: PrimaryColorPreset;
+  name: string;
+  hex: string;
+  label: string;
+  textAccent: string;
+  primaryBtn: string;
+  badgeAccent: string;
+  inputBorder: string;
+  accentBg: string;
+  accentBorder: string;
+  accentRing: string;
+}
 
 export interface ThemeTemplate {
   id: string;
   name: string;
   tagline: string;
   mode: 'dark' | 'light';
+  primaryColor: PrimaryColorPreset;
   previewBg: string;
   previewAccent: string;
   previewCardBg: string;
@@ -36,6 +62,139 @@ export interface ThemeTemplate {
   };
 }
 
+export const PRIMARY_COLORS_MAP: Record<PrimaryColorPreset, PrimaryColorConfig> = {
+  amber: {
+    id: 'amber',
+    name: 'Ámbar Dorado',
+    hex: '#f59e0b',
+    label: '#f59e0b',
+    textAccent: 'text-amber-500 dark:text-amber-400',
+    primaryBtn: 'bg-amber-500 text-zinc-950 hover:bg-amber-400 font-bold shadow-lg shadow-amber-500/20 active:scale-98',
+    badgeAccent: 'bg-amber-500/10 text-amber-500 dark:text-amber-400 border border-amber-500/30',
+    inputBorder: 'focus:border-amber-500 focus:ring-amber-500/20',
+    accentBg: 'bg-amber-500',
+    accentBorder: 'border-amber-500',
+    accentRing: 'ring-amber-500'
+  },
+  orange: {
+    id: 'orange',
+    name: 'Naranja Bistro',
+    hex: '#ea580c',
+    label: '#ea580c',
+    textAccent: 'text-orange-600 dark:text-orange-400',
+    primaryBtn: 'bg-orange-600 text-white hover:bg-orange-500 font-bold shadow-lg shadow-orange-600/20 active:scale-98',
+    badgeAccent: 'bg-orange-500/10 text-orange-600 dark:text-orange-400 border border-orange-500/30',
+    inputBorder: 'focus:border-orange-500 focus:ring-orange-500/20',
+    accentBg: 'bg-orange-600',
+    accentBorder: 'border-orange-600',
+    accentRing: 'ring-orange-600'
+  },
+  emerald: {
+    id: 'emerald',
+    name: 'Esmeralda Gourmet',
+    hex: '#10b981',
+    label: '#10b981',
+    textAccent: 'text-emerald-600 dark:text-emerald-400',
+    primaryBtn: 'bg-emerald-500 text-zinc-950 hover:bg-emerald-400 font-bold shadow-lg shadow-emerald-500/20 active:scale-98',
+    badgeAccent: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30',
+    inputBorder: 'focus:border-emerald-500 focus:ring-emerald-500/20',
+    accentBg: 'bg-emerald-500',
+    accentBorder: 'border-emerald-500',
+    accentRing: 'ring-emerald-500'
+  },
+  cyan: {
+    id: 'cyan',
+    name: 'Neón Cian',
+    hex: '#06b6d4',
+    label: '#06b6d4',
+    textAccent: 'text-cyan-500 dark:text-cyan-400',
+    primaryBtn: 'bg-cyan-500 text-zinc-950 hover:bg-cyan-400 font-bold shadow-lg shadow-cyan-500/20 active:scale-98',
+    badgeAccent: 'bg-cyan-500/10 text-cyan-500 dark:text-cyan-400 border border-cyan-500/30 shadow-sm shadow-cyan-500/30',
+    inputBorder: 'focus:border-cyan-500 focus:ring-cyan-500/20',
+    accentBg: 'bg-cyan-500',
+    accentBorder: 'border-cyan-500',
+    accentRing: 'ring-cyan-500'
+  },
+  blue: {
+    id: 'blue',
+    name: 'Azul Zafiro',
+    hex: '#2563eb',
+    label: '#2563eb',
+    textAccent: 'text-blue-600 dark:text-blue-400',
+    primaryBtn: 'bg-blue-600 text-white hover:bg-blue-500 font-bold shadow-lg shadow-blue-600/20 active:scale-98',
+    badgeAccent: 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/30',
+    inputBorder: 'focus:border-blue-500 focus:ring-blue-500/20',
+    accentBg: 'bg-blue-600',
+    accentBorder: 'border-blue-600',
+    accentRing: 'ring-blue-600'
+  },
+  indigo: {
+    id: 'indigo',
+    name: 'Índigo Profundo',
+    hex: '#6366f1',
+    label: '#6366f1',
+    textAccent: 'text-indigo-600 dark:text-indigo-400',
+    primaryBtn: 'bg-indigo-600 text-white hover:bg-indigo-500 font-bold shadow-lg shadow-indigo-600/20 active:scale-98',
+    badgeAccent: 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/30',
+    inputBorder: 'focus:border-indigo-500 focus:ring-indigo-500/20',
+    accentBg: 'bg-indigo-600',
+    accentBorder: 'border-indigo-600',
+    accentRing: 'ring-indigo-600'
+  },
+  purple: {
+    id: 'purple',
+    name: 'Púrpura Eléctrico',
+    hex: '#a855f7',
+    label: '#a855f7',
+    textAccent: 'text-purple-600 dark:text-purple-400',
+    primaryBtn: 'bg-purple-600 text-white hover:bg-purple-500 font-bold shadow-lg shadow-purple-600/20 active:scale-98',
+    badgeAccent: 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/30',
+    inputBorder: 'focus:border-purple-500 focus:ring-purple-500/20',
+    accentBg: 'bg-purple-600',
+    accentBorder: 'border-purple-600',
+    accentRing: 'ring-purple-600'
+  },
+  rose: {
+    id: 'rose',
+    name: 'Rosa Rubí',
+    hex: '#f43f5e',
+    label: '#f43f5e',
+    textAccent: 'text-rose-600 dark:text-rose-400',
+    primaryBtn: 'bg-rose-600 text-white hover:bg-rose-500 font-bold shadow-lg shadow-rose-600/20 active:scale-98',
+    badgeAccent: 'bg-rose-500/10 text-rose-600 dark:text-rose-400 border border-rose-500/30',
+    inputBorder: 'focus:border-rose-500 focus:ring-rose-500/20',
+    accentBg: 'bg-rose-600',
+    accentBorder: 'border-rose-600',
+    accentRing: 'ring-rose-600'
+  },
+  red: {
+    id: 'red',
+    name: 'Carmesí Bodegón',
+    hex: '#dc2626',
+    label: '#dc2626',
+    textAccent: 'text-red-600 dark:text-red-400',
+    primaryBtn: 'bg-red-600 text-white hover:bg-red-500 font-bold shadow-lg shadow-red-600/20 active:scale-98',
+    badgeAccent: 'bg-red-500/10 text-red-600 dark:text-red-400 border border-red-500/30',
+    inputBorder: 'focus:border-red-500 focus:ring-red-500/20',
+    accentBg: 'bg-red-600',
+    accentBorder: 'border-red-600',
+    accentRing: 'ring-red-600'
+  },
+  zinc: {
+    id: 'zinc',
+    name: 'Minimal Monocromo',
+    hex: '#71717a',
+    label: '#71717a',
+    textAccent: 'text-zinc-900 dark:text-zinc-100',
+    primaryBtn: 'bg-zinc-900 text-white hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200 font-bold shadow-md active:scale-98',
+    badgeAccent: 'bg-zinc-500/15 text-zinc-800 dark:text-zinc-200 border border-zinc-500/30',
+    inputBorder: 'focus:border-zinc-500 focus:ring-zinc-500/20',
+    accentBg: 'bg-zinc-800 dark:bg-zinc-200',
+    accentBorder: 'border-zinc-800 dark:border-zinc-200',
+    accentRing: 'ring-zinc-500'
+  }
+};
+
 export const RADIUS_MAP: Record<BorderRadiusPreset, { name: string; card: string; button: string; pill: string; label: string }> = {
   sharp: { name: 'Recto (Sharp)', card: 'rounded-none', button: 'rounded-none', pill: 'rounded-none', label: '0px' },
   soft: { name: 'Suave (Soft)', card: 'rounded-lg', button: 'rounded-md', pill: 'rounded-full', label: '8px' },
@@ -63,6 +222,7 @@ export const THEME_TEMPLATES: ThemeTemplate[] = [
     name: 'Speakeasy Noche',
     tagline: 'Elegancia oscura estilo bar de coctelería con detalles dorados',
     mode: 'dark',
+    primaryColor: 'amber',
     previewBg: '#09090b',
     previewAccent: '#f59e0b',
     previewCardBg: '#18181b',
@@ -95,6 +255,7 @@ export const THEME_TEMPLATES: ThemeTemplate[] = [
     name: 'Bistro Cálido',
     tagline: 'Modo claro acogedor para cafeterías, panaderías y bistrós',
     mode: 'light',
+    primaryColor: 'orange',
     previewBg: '#fafaf9',
     previewAccent: '#d97706',
     previewCardBg: '#ffffff',
@@ -127,6 +288,7 @@ export const THEME_TEMPLATES: ThemeTemplate[] = [
     name: 'Cyber Neon',
     tagline: 'Fondo violeta oscuro con neón cian, bordes brillantes y vidrio traslúcido',
     mode: 'dark',
+    primaryColor: 'cyan',
     previewBg: '#0f0728',
     previewAccent: '#06b6d4',
     previewCardBg: '#1e1145',
@@ -159,6 +321,7 @@ export const THEME_TEMPLATES: ThemeTemplate[] = [
     name: 'Gourmet Esmeralda',
     tagline: 'Estilo distinguido de alta cocina con tonos verde esmeralda y champán',
     mode: 'dark',
+    primaryColor: 'emerald',
     previewBg: '#022c22',
     previewAccent: '#fde047',
     previewCardBg: '#064e3b',
@@ -191,6 +354,7 @@ export const THEME_TEMPLATES: ThemeTemplate[] = [
     name: 'Minimalista Blanco & Negro',
     tagline: 'Diseño limpio de contraste puro con tipografía ultra legible y bordes nítidos',
     mode: 'light',
+    primaryColor: 'zinc',
     previewBg: '#f8fafc',
     previewAccent: '#0f172a',
     previewCardBg: '#ffffff',
@@ -223,6 +387,7 @@ export const THEME_TEMPLATES: ThemeTemplate[] = [
     name: 'Atardecer Melocotón',
     tagline: 'Modo claro con tonos cálidos de terracota, durazno y bordes redondeados',
     mode: 'light',
+    primaryColor: 'orange',
     previewBg: '#fff7ed',
     previewAccent: '#ea580c',
     previewCardBg: '#ffffff',
