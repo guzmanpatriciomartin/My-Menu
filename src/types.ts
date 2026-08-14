@@ -30,6 +30,9 @@ export interface Table {
   name: string;
   active: boolean;
   qrUrl?: string;
+  isOccupied?: boolean;
+  activeOrdersCount?: number;
+  lastClosedAt?: string;
 }
 
 export interface OrderItem {
@@ -99,6 +102,30 @@ export interface HourLine {
   revenue: number;
 }
 
+export interface CashRegisterSession {
+  id: string; // establishmentId
+  establishmentId: string;
+  isOpen: boolean;
+  openedAt?: string;
+  openedByEmail?: string;
+  openedByName?: string;
+  initialAmount?: number;
+  closedAt?: string;
+}
+
+export interface CashClosePreview {
+  isOpen: boolean;
+  openedAt?: string;
+  openedByEmail?: string;
+  openedByName?: string;
+  initialAmount?: number;
+  periodStart: string;
+  periodEnd: string;
+  totals: CashCloseTotals;
+  topProducts: ProductLine[];
+  byTable: TableLine[];
+}
+
 export interface CashClose {
   id: string;
   establishmentId: string;
@@ -111,6 +138,7 @@ export interface CashClose {
   orderIds: string[];
   topProducts: ProductLine[];
   byTable: TableLine[];
+  initialAmount?: number;
   note?: string;
   createdAt: string;
 }

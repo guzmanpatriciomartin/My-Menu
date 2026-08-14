@@ -121,6 +121,14 @@ export const saveTableSchema = z
 export type SaveTableBody = z.infer<typeof saveTableSchema>;
 
 // --- Cash close & metrics (ADR-005) ---
+export const cashOpenSchema = z
+  .object({
+    initialAmount: z.number().nonnegative().max(100_000_000).default(0),
+    note: z.string().max(500).optional(),
+  })
+  .strict();
+export type CashOpenBody = z.infer<typeof cashOpenSchema>;
+
 export const cashCloseSchema = z
   .object({
     note: z.string().max(500).optional(),

@@ -19,6 +19,7 @@ import {
   generateSeedOrders,
   generateSeedTableCalls,
   generateSeedCashCloses,
+  generateSeedCashRegisters,
 } from '../db/seedData';
 import {
   Establishment,
@@ -30,6 +31,8 @@ import {
   OrderStatus,
   TableCall,
   CashClose,
+  CashRegisterSession,
+  CashClosePreview,
   CashCloseTotals,
   MetricsSummary,
   ProductLine,
@@ -106,15 +109,7 @@ function forFirestore<T extends object>(value: T): Record<string, unknown> {
 export interface CashCloseResult {
   ok: boolean;
   close?: CashClose;
-  reason?: 'empty';
-}
-
-export interface CashClosePreview {
-  periodStart: string;
-  periodEnd: string;
-  totals: CashCloseTotals;
-  topProducts: ProductLine[];
-  byTable: TableLine[];
+  reason?: 'empty' | 'not_open';
 }
 
 export interface CashCloseActor {
@@ -134,9 +129,18 @@ export interface CreateOrderResult {
   unavailableItems?: string[];
 }
 
-// CASH_CLOSED is admin-only by construction: shouldDeliver() whitelists what a diner
+// CASH_CLOSED and CASH_OPENED are admin-only by construction: shouldDeliver() whitelists what a diner
 // may receive, so anything not listed there (this included) never reaches that channel.
-type NotifyType = 'ORDER_CREATED' | 'ORDER_STATUS_CHANGED' | 'MENU_CHANGED' | 'TABLES_CHANGED' | 'TABLE_CALL_CREATED' | 'TABLE_CALL_UPDATED' | 'TABLE_SESSION_CLOSED' | 'CASH_CLOSED';
+type NotifyType =
+  | 'ORDER_CREATED'
+  | 'ORDER_STATUS_CHANGED'
+  | 'MENU_CHANGED'
+  | 'TABLES_CHANGED'
+  | 'TABLE_CALL_CREATED'
+  | 'TABLE_CALL_UPDATED'
+  | 'TABLE_SESSION_CLOSED'
+  | 'CASH_CLOSED'
+  | 'CASH_OPENED';
 
 interface NotifyPayload {
   establishmentId: string;
@@ -154,6 +158,7 @@ function getSeedCollections(): Array<{ name: string; items: Array<{ id: string }
     { name: 'orders', items: generateSeedOrders() },
     { name: 'tableCalls', items: generateSeedTableCalls() },
     { name: 'cashCloses', items: generateSeedCashCloses() },
+    { name: 'cashRegisters', items: generateSeedCashRegisters() },
   ];
 }
 
@@ -172,6 +177,7 @@ class Store {
   private sseClients: SseClient[] = [];
   private tableCalls: TableCall[] = generateSeedTableCalls();
   private cashCloses: CashClose[] = generateSeedCashCloses();
+  private cashRegisters: CashRegisterSession[] = generateSeedCashRegisters();
   private closedSessions: Map<string, { closedAt: string; timestamp: number }> = new Map();
 
   // Serializes cash closes per tenant: two waiters hitting "Cerrar caja" at the same
@@ -270,6 +276,16 @@ class Store {
       },
       (err) => console.error('[Firestore cashCloses listener]', err)
     );
+    onSnapshot(
+      collection(db, 'cashRegisters'),
+      (snap) => {
+        const docs = snap.docs.map((d) => d.data() as CashRegisterSession);
+        const map = new Map<string, CashRegisterSession>();
+        docs.forEach((d) => map.set(d.id, d));
+        this.cashRegisters = Array.from(map.values());
+      },
+      (err) => console.error('[Firestore cashRegisters listener]', err)
+    );
   }
 
   // Writes initial demo data ONLY into collections that are currently empty. Safe to
@@ -331,6 +347,7 @@ class Store {
     };
     this.tableCalls = generateSeedTableCalls();
     this.cashCloses = generateSeedCashCloses();
+    this.cashRegisters = generateSeedCashRegisters();
     this.closedSessions.clear();
     console.log('[Firestore] Force-seed complete.');
     return true;
@@ -352,7 +369,39 @@ class Store {
   }
 
   public getTables(establishmentId: string): Table[] {
-    return this.data.tables.filter((t) => t.establishmentId === establishmentId);
+    const establishmentTables = this.data.tables.filter((t) => t.establishmentId === establishmentId);
+    const map = new Map<string, Table>();
+    establishmentTables.forEach((t) => map.set(t.id, t));
+
+    return Array.from(map.values()).map((table) => {
+      const sessionKey = `${establishmentId}_${table.id}`;
+      const closed = this.closedSessions.get(sessionKey);
+      const closedAtMs = closed ? new Date(closed.closedAt).getTime() : 0;
+
+      const sessionOrders = this.data.orders.filter(
+        (o) =>
+          o.establishmentId === establishmentId &&
+          o.tableId === table.id &&
+          o.status !== 'Cancelado' &&
+          new Date(o.createdAt).getTime() > closedAtMs
+      );
+
+      const pendingCalls = this.tableCalls.filter(
+        (c) =>
+          c.establishmentId === establishmentId &&
+          c.tableId === table.id &&
+          c.status === 'pending'
+      );
+
+      const isOccupied = sessionOrders.length > 0 || pendingCalls.length > 0;
+
+      return {
+        ...table,
+        isOccupied,
+        activeOrdersCount: sessionOrders.length,
+        lastClosedAt: closed?.closedAt,
+      };
+    });
   }
 
   public getOrders(establishmentId: string): Order[] {
@@ -364,11 +413,19 @@ class Store {
   }
 
   // Scoped diner lookup (F-4): only orders that belong to the given tenant AND table
-  // AND whose id was explicitly presented by the caller. Never enumerates.
+  // AND whose id was explicitly presented by the caller AND created during current open session.
   public lookupOrders(establishmentId: string, tableId: string, orderIds: string[]): Order[] {
+    const sessionKey = `${establishmentId}_${tableId}`;
+    const closed = this.closedSessions.get(sessionKey);
+    const closedAtMs = closed ? new Date(closed.closedAt).getTime() : 0;
     const idSet = new Set(orderIds);
+
     return this.data.orders.filter(
-      (o) => o.establishmentId === establishmentId && o.tableId === tableId && idSet.has(o.id)
+      (o) =>
+        o.establishmentId === establishmentId &&
+        o.tableId === tableId &&
+        idSet.has(o.id) &&
+        new Date(o.createdAt).getTime() > closedAtMs
     );
   }
 
@@ -586,10 +643,10 @@ class Store {
 
   // Table CRUD
   public async saveTable(table: Table): Promise<Table> {
-    const index = this.data.tables.findIndex(
+    const existingIndex = this.data.tables.findIndex(
       (t) => t.id === table.id && t.establishmentId === table.establishmentId
     );
-    if (index === -1) {
+    if (existingIndex === -1) {
       const globalIndex = this.data.tables.findIndex((t) => t.id === table.id);
       if (globalIndex !== -1) {
         throw new Error('ID already in use by another establishment');
@@ -601,10 +658,14 @@ class Store {
     } catch (e) {
       console.error('[Firestore] saveTable error:', e);
     }
-    if (index !== -1) {
-      this.data.tables[index] = table;
+
+    if (existingIndex !== -1) {
+      this.data.tables[existingIndex] = table;
     } else {
-      this.data.tables.push(table);
+      const alreadyInList = this.data.tables.some((t) => t.id === table.id);
+      if (!alreadyInList) {
+        this.data.tables.push(table);
+      }
     }
     this.notifyClients('TABLES_CHANGED', { establishmentId: table.establishmentId });
     return table;
@@ -701,6 +762,8 @@ class Store {
     } catch (e) {
       console.error('[Firestore] createTableCall error:', e);
     }
+    // A new diner call activates the table session
+    this.clearTableSession(input.establishmentId, input.tableId);
     this.tableCalls.push(newCall);
     this.notifyClients('TABLE_CALL_CREATED', { establishmentId: input.establishmentId });
     return newCall;
@@ -751,35 +814,63 @@ class Store {
   public async closeTableSession(
     establishmentId: string,
     tableId: string
-  ): Promise<{ ok: boolean; closedAt: string; ordersClosedCount: number }> {
-    const closedAt = new Date().toISOString();
+  ): Promise<{ ok: boolean; closedAt?: string; ordersClosedCount?: number; reason?: string; error?: string }> {
+    const table = this.data.tables.find(
+      (t) => t.id === tableId && t.establishmentId === establishmentId
+    );
+    if (!table) {
+      return { ok: false, reason: 'table_not_found', error: 'Mesa no encontrada' };
+    }
+
     const sessionKey = `${establishmentId}_${tableId}`;
+    const closed = this.closedSessions.get(sessionKey);
+    const closedAtMs = closed ? new Date(closed.closedAt).getTime() : 0;
+
+    // Session orders that belong to the open session (created after previous closedAt)
+    const currentSessionOrders = this.data.orders.filter(
+      (o) =>
+        o.establishmentId === establishmentId &&
+        o.tableId === tableId &&
+        o.status !== 'Cancelado' &&
+        new Date(o.createdAt).getTime() > closedAtMs
+    );
+
+    const pendingCalls = this.tableCalls.filter(
+      (c) => c.establishmentId === establishmentId && c.tableId === tableId && c.status === 'pending'
+    );
+
+    const isOccupied = currentSessionOrders.length > 0 || pendingCalls.length > 0;
+
+    // Reject closing if table is already closed / has no active orders or calls in this session
+    if (!isOccupied) {
+      return {
+        ok: false,
+        reason: 'table_already_closed',
+        error: `La mesa "${table.name}" ya se encuentra cerrada / libre.`,
+      };
+    }
+
+    const closedAt = new Date().toISOString();
     this.closedSessions.set(sessionKey, { closedAt, timestamp: Date.now() });
 
     // 1. Mark all active non-finalized orders for this table as 'Entregado' so they are archived as delivered sales
     let ordersClosedCount = 0;
-    const activeTableOrders = this.data.orders.filter(
-      (o) =>
-        o.establishmentId === establishmentId &&
-        o.tableId === tableId &&
-        o.status !== 'Entregado' &&
-        o.status !== 'Cancelado'
-    );
-
-    for (const order of activeTableOrders) {
-      const result = await this.updateOrderStatus(order.id, establishmentId, 'Entregado');
-      if (result !== null) ordersClosedCount++;
+    for (const order of currentSessionOrders) {
+      if (order.status !== 'Entregado') {
+        const result = await this.updateOrderStatus(order.id, establishmentId, 'Entregado');
+        if (result !== null) ordersClosedCount++;
+      } else {
+        ordersClosedCount++;
+      }
     }
 
     // 2. Mark pending calls for this table as 'attended'
-    const pendingCalls = this.tableCalls.filter(
-      (c) => c.establishmentId === establishmentId && c.tableId === tableId && c.status === 'pending'
-    );
     for (const call of pendingCalls) {
       await this.updateTableCallStatus(call.id, establishmentId, 'attended');
     }
 
     this.notifyClients('TABLE_SESSION_CLOSED', { establishmentId, tableId, closedAt });
+    this.notifyClients('TABLES_CHANGED', { establishmentId });
     return { ok: true, closedAt, ordersClosedCount };
   }
 
@@ -839,12 +930,64 @@ class Store {
       .slice(0, max);
   }
 
+  public getCashRegister(establishmentId: string): CashRegisterSession {
+    const reg = this.cashRegisters.find((r) => r.establishmentId === establishmentId);
+    if (reg) return reg;
+    return {
+      id: establishmentId,
+      establishmentId,
+      isOpen: false,
+      initialAmount: 0,
+    };
+  }
+
+  public async openCashRegister(
+    establishmentId: string,
+    actor: CashCloseActor,
+    initialAmount = 0,
+    note?: string
+  ): Promise<{ ok: boolean; register?: CashRegisterSession; error?: string }> {
+    const current = this.getCashRegister(establishmentId);
+    if (current.isOpen) {
+      return { ok: false, error: 'La caja ya se encuentra abierta para este establecimiento.' };
+    }
+
+    const now = new Date().toISOString();
+    const updated: CashRegisterSession = {
+      id: establishmentId,
+      establishmentId,
+      isOpen: true,
+      openedAt: now,
+      openedByEmail: actor.email,
+      openedByName: actor.name,
+      initialAmount,
+    };
+
+    await setDoc(doc(db, 'cashRegisters', establishmentId), forFirestore(updated));
+
+    const idx = this.cashRegisters.findIndex((r) => r.establishmentId === establishmentId);
+    if (idx !== -1) {
+      this.cashRegisters[idx] = updated;
+    } else {
+      this.cashRegisters.push(updated);
+    }
+
+    this.notifyClients('CASH_OPENED', { establishmentId });
+    return { ok: true, register: updated };
+  }
+
   // What the waiter sees before pressing the button. Same arithmetic as the close, but
   // writes nothing.
   public previewCashClose(establishmentId: string): CashClosePreview {
-    const pending = this.pendingCashCloseOrders(establishmentId);
+    const register = this.getCashRegister(establishmentId);
+    const pending = register.isOpen ? this.pendingCashCloseOrders(establishmentId) : [];
     return {
-      periodStart: this.openPeriodStart(establishmentId, pending),
+      isOpen: register.isOpen,
+      openedAt: register.openedAt,
+      openedByEmail: register.openedByEmail,
+      openedByName: register.openedByName,
+      initialAmount: register.initialAmount ?? 0,
+      periodStart: register.openedAt || this.openPeriodStart(establishmentId, pending),
       periodEnd: new Date().toISOString(),
       totals: computeTotals(pending),
       topProducts: computeTopProducts(pending),
@@ -880,6 +1023,11 @@ class Store {
     actor: CashCloseActor,
     note?: string
   ): Promise<CashCloseResult> {
+    const register = this.getCashRegister(establishmentId);
+    if (!register.isOpen) {
+      return { ok: false, reason: 'not_open' };
+    }
+
     const pending = this.pendingCashCloseOrders(establishmentId);
     // Refusing to record an empty close keeps the history meaningful and makes a
     // double-submit harmless.
@@ -892,19 +1040,27 @@ class Store {
       closedByEmail: actor.email,
       closedByName: actor.name,
       closedByRole: actor.role,
-      periodStart: this.openPeriodStart(establishmentId, pending),
+      periodStart: register.openedAt || this.openPeriodStart(establishmentId, pending),
       periodEnd: now,
       totals: computeTotals(pending),
       orderIds: pending.map((o) => o.id),
       topProducts: computeTopProducts(pending),
       byTable: computeByTable(pending),
+      initialAmount: register.initialAmount ?? 0,
       note,
       createdAt: now,
     };
 
-    // One atomic batch: either the close exists AND every order is stamped, or nothing
-    // happened. A partial write here would double-count orders on the next close.
-    // Firestore caps a batch at 500 operations, so chunk when a period is huge.
+    const updatedRegister: CashRegisterSession = {
+      id: establishmentId,
+      establishmentId,
+      isOpen: false,
+      closedAt: now,
+      initialAmount: 0,
+    };
+
+    // One atomic batch: either the close exists AND every order is stamped AND the cash register
+    // is marked closed, or nothing happened.
     const BATCH_LIMIT = 490;
     const chunks: Order[][] = [];
     for (let i = 0; i < pending.length; i += BATCH_LIMIT) {
@@ -913,9 +1069,10 @@ class Store {
 
     for (let i = 0; i < chunks.length; i++) {
       const batch = writeBatch(db);
-      // The close document goes in the first chunk so it lands together with the bulk
-      // of the stamps.
-      if (i === 0) batch.set(doc(db, 'cashCloses', close.id), forFirestore(close));
+      if (i === 0) {
+        batch.set(doc(db, 'cashCloses', close.id), forFirestore(close));
+        batch.set(doc(db, 'cashRegisters', establishmentId), forFirestore(updatedRegister));
+      }
       for (const order of chunks[i]) {
         batch.set(doc(db, 'orders', order.id), forFirestore({ ...order, cashCloseId: close.id }));
       }
@@ -925,6 +1082,13 @@ class Store {
     // Memory after the write succeeded, mirroring the write-then-memory order used by
     // the rest of the store.
     this.cashCloses.push(close);
+    const regIdx = this.cashRegisters.findIndex((r) => r.establishmentId === establishmentId);
+    if (regIdx !== -1) {
+      this.cashRegisters[regIdx] = updatedRegister;
+    } else {
+      this.cashRegisters.push(updatedRegister);
+    }
+
     const stamped = new Set(close.orderIds);
     this.data.orders = this.data.orders.map((o) =>
       stamped.has(o.id) ? { ...o, cashCloseId: close.id } : o

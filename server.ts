@@ -24,6 +24,7 @@ import {
   saveTableSchema,
   createTableCallSchema,
   updateTableCallSchema,
+  cashOpenSchema,
   cashCloseSchema,
   metricsQuerySchema,
   cashClosesQuerySchema,
@@ -388,6 +389,9 @@ async function startServer() {
   app.post('/api/tables/:id/close', requireAuth, async (req, res, next) => {
     try {
       const result = await store.closeTableSession(req.user!.establishmentId, req.params.id);
+      if (!result.ok) {
+        return res.status(409).json({ error: result.error || 'La mesa no se encuentra abierta o ya fue cerrada previamente.' });
+      }
       res.json(result);
     } catch (e) {
       next(e);
@@ -412,6 +416,32 @@ async function startServer() {
       const q = parseQuery(metricsQuerySchema, req, res);
       if (!q) return;
       res.json(store.getMetrics(req.user!.establishmentId, q.day));
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // Register opening endpoint — starts a new shift with optional starting float
+  app.post('/api/my/cash-open', requireAuth, async (req, res, next) => {
+    try {
+      const body = parseBody(cashOpenSchema, req, res);
+      if (!body) return;
+
+      const result = await store.openCashRegister(
+        req.user!.establishmentId,
+        {
+          email: req.user!.email,
+          name: req.user!.email.split('@')[0],
+          role: req.user!.role,
+        },
+        body.initialAmount,
+        body.note
+      );
+
+      if (!result.ok) {
+        return res.status(400).json({ error: result.error || 'No se pudo abrir la caja' });
+      }
+      res.status(200).json(result.register);
     } catch (e) {
       next(e);
     }
@@ -445,6 +475,11 @@ async function startServer() {
       );
 
       if (!result.ok) {
+        if (result.reason === 'not_open') {
+          return res
+            .status(409)
+            .json({ error: 'La caja se encuentra cerrada. Debe abrir la caja para iniciar un turno antes de cerrarla.' });
+        }
         return res
           .status(409)
           .json({ error: 'No hay pedidos entregados pendientes de cierre' });

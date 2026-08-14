@@ -6,6 +6,7 @@ import {
   Order,
   TableCall,
   CashClose,
+  CashRegisterSession,
   ProductLine,
   TableLine,
   CashCloseTotals,
@@ -979,5 +980,28 @@ export function generateSeedCashCloses(): CashClose[] {
   ];
 
   return closes;
+}
+
+export function generateSeedCashRegisters(): CashRegisterSession[] {
+  return [
+    {
+      id: 'bodegon-palermo',
+      establishmentId: 'bodegon-palermo',
+      isOpen: true,
+      openedAt: getVenueIsoDate(0, 18, 30),
+      openedByEmail: 'carolina@mimenu.com',
+      openedByName: 'Carolina (Admin)',
+      initialAmount: 15000,
+    },
+    {
+      id: 'cafe-speakeasy',
+      establishmentId: 'cafe-speakeasy',
+      isOpen: true,
+      openedAt: getVenueIsoDate(0, 15, 0),
+      openedByEmail: 'sofia@mimenu.com',
+      openedByName: 'Sofía (Admin)',
+      initialAmount: 10000,
+    },
+  ];
 }
 

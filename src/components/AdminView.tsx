@@ -31,19 +31,23 @@ import {
   Wallet,
   BarChart3,
   Printer,
-  AlertCircle
+  AlertCircle,
+  Lock
 } from 'lucide-react';
-import { Establishment, Category, MenuItem, Table, Order, OrderStatus, UserSession, UserRole, TableCall, CashClose, MetricsSummary } from '../types';
-
-// Mirrors the /api/my/cash-close/preview payload (server-computed; never derived here).
-interface CashClosePreview {
-  periodStart: string;
-  periodEnd: string;
-  totals: { orderCount: number; totalRevenue: number; averageTicket: number };
-  orderCount: number;
-  topProducts: { menuItemId: string; name: string; units: number; revenue: number }[];
-  byTable: { tableId: string; tableName: string; orderCount: number; revenue: number }[];
-}
+import {
+  Establishment,
+  Category,
+  MenuItem,
+  Table,
+  Order,
+  OrderStatus,
+  UserSession,
+  UserRole,
+  TableCall,
+  CashClose,
+  CashClosePreview,
+  MetricsSummary,
+} from '../types';
 import { playNewOrderSound, playAlertSound } from './SoundUtility';
 import { useTheme } from '../theme/ThemeContext';
 import ThemeTriggerButton from './ThemeTriggerButton';
@@ -83,13 +87,17 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [activeTab, setActiveTab] = useState<'diseño_mesas' | 'pedidos' | 'menu_items' | 'historial' | 'caja' | 'metricas'>('pedidos');
 
-  // Cash close (ADR-005). Preview is what the shift has pending right now; closes is the
+  // Cash close & open (ADR-005). Preview is what the shift has pending right now; closes is the
   // history. Both are available to waiters — closing the register is shift work.
   const [cashPreview, setCashPreview] = useState<CashClosePreview | null>(null);
   const [cashCloses, setCashCloses] = useState<CashClose[]>([]);
   const [isClosingCash, setIsClosingCash] = useState(false);
   const [confirmCashClose, setConfirmCashClose] = useState(false);
   const [cashCloseNote, setCashCloseNote] = useState('');
+  const [isOpeningCash, setIsOpeningCash] = useState(false);
+  const [confirmCashOpen, setConfirmCashOpen] = useState(false);
+  const [cashOpenInitialAmount, setCashOpenInitialAmount] = useState<number | string>(0);
+  const [cashOpenNote, setCashOpenNote] = useState('');
   const [lastReceipt, setLastReceipt] = useState<CashClose | null>(null);
   const [cashError, setCashError] = useState('');
 
@@ -115,6 +123,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   // Table Editor Modal
   const [isTableModalOpen, setIsTableModalOpen] = useState(false);
   const [editingTable, setEditingTable] = useState<Partial<Table> | null>(null);
+  const [isSavingTable, setIsSavingTable] = useState(false);
 
   // Filters
   const [menuSearch, setMenuSearch] = useState('');
@@ -210,7 +219,11 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       if (Array.isArray(estRes)) setEstablishments(estRes);
       if (Array.isArray(catRes)) setCategories(catRes);
       if (Array.isArray(menuRes)) setMenuItems(menuRes);
-      if (Array.isArray(tabRes)) setTables(tabRes);
+      if (Array.isArray(tabRes)) {
+        const tableMap = new Map<string, Table>();
+        tabRes.forEach((t: Table) => tableMap.set(t.id, t));
+        setTables(Array.from(tableMap.values()));
+      }
       if (Array.isArray(callsRes)) setTableCalls(callsRes);
       if (Array.isArray(ordRes)) {
         const orderMap = new Map<string, Order>();
@@ -259,7 +272,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   };
 
   const handleCloseTableSession = async (tableId: string, tableName: string) => {
-    if (!window.confirm(`¿Estás seguro/a de cerrar manualmente la mesa "${tableName}"?\n\nEsto finalizará la sesión del cliente de forma inmediata y registrará las compras del comensal.`)) {
+    if (!window.confirm(`¿Estás seguro/a de cerrar manualmente la mesa "${tableName}"?\n\nEsto finalizará la sesión del cliente de forma inmediata y completará los pedidos pendientes.`)) {
       return;
     }
     try {
@@ -268,7 +281,11 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
         credentials: 'include'
       });
       if (res.ok) {
-        fetchDbState();
+        await fetchDbState();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || 'No se pudo cerrar la mesa porque ya se encuentra cerrada o no tiene pedidos activos.');
+        await fetchDbState();
       }
     } catch (err) {
       console.error('Error closing table session', err);
@@ -332,7 +349,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
             // Pull fresh lists; sound is handled inside fetchDbState via orderCountRef comparison (F-1)
             fetchDbState();
             if (activeTabRef.current === 'caja') fetchCashState();
-          } else if ((msg.type === 'ORDER_STATUS_CHANGED' || msg.type === 'TABLE_SESSION_CLOSED' || msg.type === 'CASH_CLOSED') && msg.payload.establishmentId === activeEstId) {
+          } else if ((msg.type === 'ORDER_STATUS_CHANGED' || msg.type === 'TABLE_SESSION_CLOSED' || msg.type === 'CASH_CLOSED' || msg.type === 'CASH_OPENED') && msg.payload.establishmentId === activeEstId) {
             fetchDbState();
             if (activeTabRef.current === 'caja') fetchCashState();
           }
@@ -519,8 +536,9 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   // Table Mutations (CRUD)
   const handleSaveTable = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingTable || !editingTable.name) return;
+    if (!editingTable || !editingTable.name || isSavingTable) return;
 
+    setIsSavingTable(true);
     const payload = {
       ...editingTable,
       establishmentId: activeEstId,
@@ -536,12 +554,17 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
         body: JSON.stringify(payload)
       });
       if (res.ok) {
-        fetchDbState();
+        await fetchDbState();
         setIsTableModalOpen(false);
         setEditingTable(null);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || 'Error al guardar la mesa');
       }
     } catch (e) {
-      console.error(e);
+      console.error('Error saving table', e);
+    } finally {
+      setIsSavingTable(false);
     }
   };
 
@@ -556,6 +579,31 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     } catch (e) {
       console.error(e);
     }
+  };
+
+  // Check table occupancy (active orders in current session or pending calls)
+  const getTableOccupancy = (tableId: string) => {
+    const tableObj = tables.find(t => t.id === tableId);
+    if (tableObj && typeof tableObj.isOccupied === 'boolean') {
+      return {
+        isOccupied: tableObj.isOccupied,
+        activeOrdersCount: tableObj.activeOrdersCount || 0,
+        pendingCallsCount: tableCalls.filter(c => c.tableId === tableId && c.status === 'pending').length
+      };
+    }
+    const lastClosedAtMs = tableObj?.lastClosedAt ? new Date(tableObj.lastClosedAt).getTime() : 0;
+    const tableOrders = orders.filter(
+      (o) => o.tableId === tableId && o.status !== 'Cancelado' && new Date(o.createdAt).getTime() > lastClosedAtMs
+    );
+    const tableCallsPending = tableCalls.filter(
+      (c) => c.tableId === tableId && c.status === 'pending'
+    );
+    const isOccupied = tableOrders.length > 0 || tableCallsPending.length > 0;
+    return {
+      isOccupied,
+      activeOrdersCount: tableOrders.length,
+      pendingCallsCount: tableCallsPending.length
+    };
   };
 
   // Calculate table stats and total items
@@ -675,6 +723,40 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       setCashError('No se pudo conectar con el servidor.');
     } finally {
       setIsClosingCash(false);
+    }
+  };
+
+  const handleCashOpen = async () => {
+    setIsOpeningCash(true);
+    setCashError('');
+    try {
+      const initialAmount = typeof cashOpenInitialAmount === 'string' ? parseFloat(cashOpenInitialAmount) || 0 : cashOpenInitialAmount;
+      const res = await fetch('/api/my/cash-open', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          initialAmount: Math.max(0, initialAmount),
+          note: cashOpenNote.trim() || undefined
+        })
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setCashError(data.error || 'No se pudo abrir la caja. Intentá de nuevo.');
+        return;
+      }
+
+      setConfirmCashOpen(false);
+      setCashOpenNote('');
+      setCashOpenInitialAmount(0);
+      setLastReceipt(null);
+      await Promise.all([fetchCashState(), fetchDbState()]);
+    } catch (err) {
+      console.error('Cash open failed', err);
+      setCashError('No se pudo conectar con el servidor.');
+    } finally {
+      setIsOpeningCash(false);
     }
   };
 
@@ -1356,6 +1438,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               {/* Grid of tables */}
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-5">
                 {tables.map((table) => {
+                  const { isOccupied, activeOrdersCount, pendingCallsCount } = getTableOccupancy(table.id);
                   const cleanOrigin = window.location.origin;
                   const finalClientUrl = `${cleanOrigin}/?establishment=${activeEstId}&table=${table.id}`;
                   const qrApiUrl = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(finalClientUrl)}`;
@@ -1365,17 +1448,28 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       id={`table-card-${table.id}`}
                       key={table.id}
                       className={`${classes.bgCard} border ${
-                        table.active ? classes.borderCard : 'border-dashed opacity-40'
+                        table.active ? (isOccupied ? 'border-amber-500/40 ring-1 ring-amber-500/20' : classes.borderCard) : 'border-dashed opacity-40'
                       } ${classes.radiusCard} p-4.5 flex flex-col justify-between`}
                     >
                       <div className="space-y-3">
                         <div className="flex items-center justify-between">
                           <h4 className={`font-black text-xs ${classes.textPrimary} uppercase tracking-wider`}>{table.name}</h4>
-                          <span className={`text-[9px] font-mono font-black uppercase px-2 py-0.5 ${classes.radiusPill} border ${
-                            table.active ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : `${classes.bgCard} ${classes.borderCard} ${classes.textMuted}`
-                          }`}>
-                            {table.active ? 'Activa' : 'Inactiva'}
-                          </span>
+                          <div className="flex items-center space-x-1.5">
+                            {table.active && (
+                              <span className={`text-[9px] font-mono font-black uppercase px-2 py-0.5 ${classes.radiusPill} border ${
+                                isOccupied
+                                  ? 'bg-amber-500/15 text-amber-400 border-amber-500/30 animate-pulse'
+                                  : 'bg-zinc-500/10 text-zinc-400 border-zinc-500/20'
+                              }`}>
+                                {isOccupied ? `Ocupada (${activeOrdersCount} ped)` : 'Libre'}
+                              </span>
+                            )}
+                            <span className={`text-[9px] font-mono font-black uppercase px-2 py-0.5 ${classes.radiusPill} border ${
+                              table.active ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : `${classes.bgCard} ${classes.borderCard} ${classes.textMuted}`
+                            }`}>
+                              {table.active ? 'Activa' : 'Inactiva'}
+                            </span>
+                          </div>
                         </div>
 
                         {/* Interactive mini QR placard */}
@@ -1427,10 +1521,15 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                           <button
                             id={`btn-close-table-card-${table.id}`}
                             onClick={() => handleCloseTableSession(table.id, table.name)}
-                            className={`px-2.5 py-1.5 ${classes.radiusBtn} bg-rose-500/10 border border-rose-500/30 hover:border-rose-500 text-rose-400 text-[10px] font-black uppercase tracking-wider transition cursor-pointer`}
-                            title="Cerrar la sesión de la mesa"
+                            disabled={!isOccupied}
+                            className={`px-2.5 py-1.5 ${classes.radiusBtn} ${
+                              isOccupied
+                                ? 'bg-rose-500/10 border border-rose-500/30 hover:border-rose-500 text-rose-400 cursor-pointer shadow-sm'
+                                : `${classes.inputBg} border ${classes.borderCard} ${classes.textMuted} cursor-not-allowed opacity-50`
+                            } text-[10px] font-black uppercase tracking-wider transition`}
+                            title={isOccupied ? 'Cerrar la sesión de la mesa' : 'Mesa libre / sin sesión activa'}
                           >
-                            Cerrar Mesa
+                            {isOccupied ? 'Cerrar Mesa' : 'Mesa Libre'}
                           </button>
 
                           <button
@@ -1684,10 +1783,30 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
           {/* TAB: Cash close — available to admin and waiter (shift work). */}
           {activeTab === 'caja' && (
             <div className="space-y-6">
-              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 space-y-1`}>
-                <h2 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>Cierre de Caja y Arqueo de Turno</h2>
+              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 space-y-2`}>
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <h2 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>Control y Cierre de Caja</h2>
+                  {cashPreview?.isOpen ? (
+                    <div className="flex items-center space-x-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] font-black uppercase tracking-wider font-mono">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                      <span>Caja Abierta (Turno Activo)</span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center space-x-2 px-3 py-1 rounded-full bg-zinc-500/10 border border-zinc-500/30 text-zinc-400 text-[10px] font-black uppercase tracking-wider font-mono">
+                      <span className="w-2 h-2 rounded-full bg-zinc-500" />
+                      <span>Caja Cerrada</span>
+                    </div>
+                  )}
+                </div>
                 <p className={`text-xs ${classes.textMuted} font-medium`}>
-                  El arqueo agrupa todos los pedidos <span className="font-black text-amber-500">entregados</span> que aún no han sido imputados a un cierre. Al cerrar, se emite el comprobante y el turno se reinicia.
+                  {cashPreview?.isOpen ? (
+                    <>
+                      Turno iniciado por <span className="font-bold text-amber-500">{cashPreview.openedByName || cashPreview.openedByEmail || 'Personal'}</span> el {formatDateTime(cashPreview.periodStart || '')}.
+                      {cashPreview.initialAmount ? ` Fondo inicial de cambio: ${formatPrice(cashPreview.initialAmount)}.` : ''}
+                    </>
+                  ) : (
+                    'La caja se encuentra cerrada. Debe realizar la apertura de caja para iniciar el turno antes de poder operar o realizar un cierre.'
+                  )}
                 </p>
               </div>
 
@@ -1714,20 +1833,42 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 </div>
               )}
 
-              {/* Open period summary */}
-              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-6 space-y-5`}>
-                <div className="flex items-start justify-between flex-wrap gap-4">
-                  <div className="space-y-1">
-                    <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>Total acumulado del turno</span>
-                    <span id="cash-open-total" className="text-3xl font-black text-amber-500 block">
-                      {formatPrice(cashPreview?.totals.totalRevenue ?? 0)}
-                    </span>
-                    <span className={`text-[10px] ${classes.textMuted} font-mono block pt-1`}>
-                      Turno abierto desde {formatDateTime(cashPreview?.periodStart || '')}
-                    </span>
+              {/* Open period summary or Closed register card */}
+              {cashPreview?.isOpen ? (
+                <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-6 space-y-5`}>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="space-y-1">
+                      <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>Ventas del turno</span>
+                      <span id="cash-open-total" className="text-3xl font-black text-amber-500 block">
+                        {formatPrice(cashPreview?.totals.totalRevenue ?? 0)}
+                      </span>
+                      <span className={`text-[10px] ${classes.textMuted} font-mono block pt-0.5`}>
+                        Turno abierto desde {formatDateTime(cashPreview?.periodStart || '')}
+                      </span>
+                    </div>
+
+                    <div className="space-y-1">
+                      <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>Fondo inicial</span>
+                      <span className={`text-2xl font-black ${classes.textPrimary} block font-mono`}>
+                        {formatPrice(cashPreview?.initialAmount ?? 0)}
+                      </span>
+                      <span className={`text-[10px] ${classes.textMuted} font-mono block pt-0.5`}>
+                        Efectivo inicial en caja chica
+                      </span>
+                    </div>
+
+                    <div className="space-y-1">
+                      <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>Total esperado en caja</span>
+                      <span className="text-2xl font-black text-emerald-400 block font-mono">
+                        {formatPrice((cashPreview?.initialAmount ?? 0) + (cashPreview?.totals.totalRevenue ?? 0))}
+                      </span>
+                      <span className={`text-[10px] ${classes.textMuted} font-mono block pt-0.5`}>
+                        Fondo inicial + Ventas
+                      </span>
+                    </div>
                   </div>
 
-                  <div className="flex gap-6">
+                  <div className={`border-t ${classes.borderCard} pt-4 flex gap-6`}>
                     <div className="space-y-1">
                       <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>Pedidos entregados</span>
                       <span className={`text-xl font-black ${classes.textPrimary}`}>{cashPreview?.totals.orderCount ?? 0}</span>
@@ -1737,51 +1878,85 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       <span className={`text-xl font-black ${classes.textPrimary}`}>{formatPrice(cashPreview?.totals.averageTicket ?? 0)}</span>
                     </div>
                   </div>
-                </div>
 
-                {/* Table Breakdown of open shift if any */}
-                {cashPreview && cashPreview.byTable && cashPreview.byTable.length > 0 && (
-                  <div className={`border-t ${classes.borderCard} pt-4 space-y-2`}>
-                    <span className={`text-[10px] font-mono font-bold uppercase tracking-wider ${classes.textMuted}`}>
-                      Detalle por mesa en este turno ({cashPreview.byTable.length})
-                    </span>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5 pt-1">
-                      {cashPreview.byTable.map(t => (
-                        <div key={t.tableId} className={`p-3 ${classes.inputBg} border ${classes.borderCard} ${classes.radiusCard} flex items-center justify-between`}>
-                          <div>
-                            <p className={`text-xs font-bold ${classes.textPrimary}`}>{t.tableName}</p>
-                            <p className={`text-[9px] font-mono ${classes.textMuted}`}>{t.orderCount} pedido(s)</p>
+                  {/* Table Breakdown of open shift if any */}
+                  {cashPreview && cashPreview.byTable && cashPreview.byTable.length > 0 && (
+                    <div className={`border-t ${classes.borderCard} pt-4 space-y-2`}>
+                      <span className={`text-[10px] font-mono font-bold uppercase tracking-wider ${classes.textMuted}`}>
+                        Detalle por mesa en este turno ({cashPreview.byTable.length})
+                      </span>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5 pt-1">
+                        {cashPreview.byTable.map(t => (
+                          <div key={t.tableId} className={`p-3 ${classes.inputBg} border ${classes.borderCard} ${classes.radiusCard} flex items-center justify-between`}>
+                            <div>
+                              <p className={`text-xs font-bold ${classes.textPrimary}`}>{t.tableName}</p>
+                              <p className={`text-[9px] font-mono ${classes.textMuted}`}>{t.orderCount} pedido(s)</p>
+                            </div>
+                            <span className="font-mono font-bold text-xs text-amber-500">{formatPrice(t.revenue)}</span>
                           </div>
-                          <span className="font-mono font-bold text-xs text-amber-500">{formatPrice(t.revenue)}</span>
-                        </div>
-                      ))}
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {cashError && (
+                    <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-lg flex items-center space-x-2">
+                      <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                      <p className="text-xs font-bold text-rose-400">{cashError}</p>
+                    </div>
+                  )}
+
+                  <div className="pt-2 flex items-center gap-3">
+                    <button
+                      id="btn-open-cash-close"
+                      onClick={() => { setCashError(''); setConfirmCashClose(true); }}
+                      disabled={isClosingCash || !cashPreview || cashPreview.totals.orderCount === 0}
+                      className={`px-5 py-3 ${classes.radiusBtn} text-xs font-black uppercase tracking-widest transition flex items-center space-x-2 ${
+                        !cashPreview || cashPreview.totals.orderCount === 0
+                          ? `${classes.inputBg} ${classes.textMuted} cursor-not-allowed border ${classes.borderCard}`
+                          : 'bg-amber-500 hover:bg-amber-400 text-zinc-950 cursor-pointer shadow-md'
+                      }`}
+                    >
+                      <Wallet className="w-4 h-4" />
+                      <span>{cashPreview && cashPreview.totals.orderCount === 0 ? 'Sin pedidos para cerrar' : 'Cerrar caja'}</span>
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-6 space-y-5`}>
+                  <div className="p-5 bg-zinc-500/10 border border-zinc-500/20 rounded-xl flex items-start space-x-4">
+                    <div className="p-3 rounded-lg bg-zinc-800/80 text-zinc-300">
+                      <Lock className="w-6 h-6" />
+                    </div>
+                    <div className="space-y-1">
+                      <h3 className={`text-sm font-bold ${classes.textPrimary}`}>
+                        Caja cerrada — No hay turno activo
+                      </h3>
+                      <p className={`text-xs ${classes.textMuted}`}>
+                        La caja se encuentra cerrada. Para comenzar a imputar cobros y pedidos al arqueo de caja, debes iniciar un nuevo turno.
+                      </p>
                     </div>
                   </div>
-                )}
 
-                {cashError && (
-                  <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-lg flex items-center space-x-2">
-                    <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
-                    <p className="text-xs font-bold text-rose-400">{cashError}</p>
+                  {cashError && (
+                    <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-lg flex items-center space-x-2">
+                      <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                      <p className="text-xs font-bold text-rose-400">{cashError}</p>
+                    </div>
+                  )}
+
+                  <div className="pt-1 flex items-center gap-3">
+                    <button
+                      id="btn-open-cash-open-modal"
+                      onClick={() => { setCashError(''); setConfirmCashOpen(true); }}
+                      className={`px-6 py-3.5 ${classes.radiusBtn} bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-black uppercase tracking-widest transition flex items-center space-x-2 cursor-pointer shadow-md`}
+                    >
+                      <Wallet className="w-4 h-4" />
+                      <span>Abrir caja / Iniciar turno</span>
+                    </button>
                   </div>
-                )}
-
-                <div className="pt-2 flex items-center gap-3">
-                  <button
-                    id="btn-open-cash-close"
-                    onClick={() => { setCashError(''); setConfirmCashClose(true); }}
-                    disabled={isClosingCash || !cashPreview || cashPreview.totals.orderCount === 0}
-                    className={`px-5 py-3 ${classes.radiusBtn} text-xs font-black uppercase tracking-widest transition flex items-center space-x-2 ${
-                      !cashPreview || cashPreview.totals.orderCount === 0
-                        ? `${classes.inputBg} ${classes.textMuted} cursor-not-allowed border ${classes.borderCard}`
-                        : 'bg-amber-500 hover:bg-amber-400 text-zinc-950 cursor-pointer shadow-md'
-                    }`}
-                  >
-                    <Wallet className="w-4 h-4" />
-                    <span>{cashPreview && cashPreview.totals.orderCount === 0 ? 'Sin pedidos para cerrar' : 'Cerrar caja'}</span>
-                  </button>
                 </div>
-              </div>
+              )}
 
               {/* Receipt of the close just made */}
               {lastReceipt && (
@@ -2387,6 +2562,104 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
         )}
       </AnimatePresence>
 
+      {/* MODAL: Cash open modal */}
+      <AnimatePresence>
+        {confirmCashOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 0.5 }}
+              exit={{ opacity: 0 }}
+              onClick={() => !isOpeningCash && setConfirmCashOpen(false)}
+              className="absolute inset-0 bg-black"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.96 }}
+              className={`relative w-full max-w-md ${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-6 space-y-5 shadow-2xl`}
+            >
+              <div className="space-y-1.5">
+                <div className="flex items-center space-x-2 text-emerald-500 font-mono text-[10px] font-black uppercase tracking-widest">
+                  <Wallet className="w-4 h-4" />
+                  <span>Nuevo Turno de Caja</span>
+                </div>
+                <h3 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>Apertura de Caja</h3>
+                <p className={`text-xs ${classes.textMuted} font-medium`}>
+                  Iniciá el turno para comenzar a imputar cobros y pedidos al arqueo de caja.
+                </p>
+              </div>
+
+              {/* Initial float input */}
+              <div className="space-y-1.5">
+                <label className={`text-[10px] font-bold uppercase tracking-wider ${classes.textMuted}`}>
+                  Fondo Inicial de Cambio ($)
+                </label>
+                <div className="relative">
+                  <span className={`absolute left-3 top-1/2 -translate-y-1/2 font-mono font-bold text-xs ${classes.textMuted}`}>$</span>
+                  <input
+                    id="input-cash-open-amount"
+                    type="number"
+                    min="0"
+                    step="100"
+                    placeholder="0"
+                    value={cashOpenInitialAmount}
+                    onChange={(e) => setCashOpenInitialAmount(e.target.value)}
+                    disabled={isOpeningCash}
+                    className={`w-full ${classes.inputBg} border ${classes.inputBorder} pl-7 pr-3 py-3 ${classes.radiusCard} text-xs ${classes.textPrimary} focus:outline-none font-mono font-bold`}
+                  />
+                </div>
+                <p className={`text-[10px] ${classes.textMuted} font-mono`}>
+                  Monto de efectivo disponible en caja chica para dar cambio.
+                </p>
+              </div>
+
+              {/* Note input */}
+              <div className="space-y-1.5">
+                <label className={`text-[10px] font-bold uppercase tracking-wider ${classes.textMuted}`}>
+                  Observación de apertura (opcional)
+                </label>
+                <input
+                  type="text"
+                  placeholder="Ej. Turno mañana, fondo recibido conforme..."
+                  value={cashOpenNote}
+                  onChange={(e) => setCashOpenNote(e.target.value)}
+                  disabled={isOpeningCash}
+                  className={`w-full ${classes.inputBg} border ${classes.inputBorder} p-3 ${classes.radiusCard} text-xs ${classes.textPrimary} focus:outline-none font-medium`}
+                />
+              </div>
+
+              {cashError && (
+                <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-lg flex items-center space-x-2">
+                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                  <p className="text-xs font-bold text-rose-400">{cashError}</p>
+                </div>
+              )}
+
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => { setCashError(''); setConfirmCashOpen(false); }}
+                  disabled={isOpeningCash}
+                  className={`flex-1 px-4 py-3 ${classes.radiusBtn} ${classes.inputBg} border ${classes.borderCard} ${classes.textSecondary} text-xs font-black uppercase tracking-widest cursor-pointer`}
+                >
+                  Cancelar
+                </button>
+                <button
+                  id="btn-confirm-cash-open"
+                  type="button"
+                  onClick={handleCashOpen}
+                  disabled={isOpeningCash}
+                  className={`flex-1 px-4 py-3 ${classes.radiusBtn} bg-emerald-500 hover:bg-emerald-400 text-zinc-950 text-xs font-black uppercase tracking-widest cursor-pointer disabled:opacity-60 disabled:cursor-wait`}
+                >
+                  {isOpeningCash ? 'Abriendo…' : 'Abrir Caja'}
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       {/* MODAL: Cash close confirmation — irreversible, so it shows the amount first */}
       <AnimatePresence>
         {confirmCashClose && cashPreview && (
@@ -2407,14 +2680,25 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               <div className="space-y-1.5">
                 <h3 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>Confirmar cierre de caja</h3>
                 <p className={`text-xs ${classes.textMuted} font-medium`}>
-                  Se van a cerrar <span className="font-black text-amber-500">{cashPreview.totals.orderCount}</span> pedidos entregados. Una vez confirmada la operación, se emitirá el comprobante oficial y no podrá revertirse.
+                  Se van a cerrar <span className="font-black text-amber-500">{cashPreview.totals.orderCount}</span> pedidos entregados. Una vez confirmada la operación, se emitirá el comprobante oficial y el turno quedará cerrado.
                 </p>
               </div>
 
-              <div className={`${classes.inputBg} border ${classes.borderCard} ${classes.radiusCard} p-4 text-center space-y-1`}>
-                <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>Total a liquidar</span>
-                <span className="text-3xl font-black text-amber-500 font-mono block">{formatPrice(cashPreview.totals.totalRevenue)}</span>
-                <span className={`text-[10px] ${classes.textMuted} font-mono block`}>Ticket promedio: {formatPrice(cashPreview.totals.averageTicket)}</span>
+              <div className={`${classes.inputBg} border ${classes.borderCard} ${classes.radiusCard} p-4 space-y-2`}>
+                <div className="flex justify-between items-center text-xs">
+                  <span className={classes.textMuted}>Fondo inicial:</span>
+                  <span className={`font-mono font-bold ${classes.textPrimary}`}>{formatPrice(cashPreview.initialAmount ?? 0)}</span>
+                </div>
+                <div className="flex justify-between items-center text-xs">
+                  <span className={classes.textMuted}>Ventas del turno ({cashPreview.totals.orderCount} pedidos):</span>
+                  <span className="font-mono font-bold text-amber-500">{formatPrice(cashPreview.totals.totalRevenue)}</span>
+                </div>
+                <div className={`border-t ${classes.borderCard} pt-2 flex justify-between items-center`}>
+                  <span className={`text-xs font-black uppercase ${classes.textPrimary}`}>Total esperado:</span>
+                  <span className="text-lg font-black font-mono text-emerald-400">
+                    {formatPrice((cashPreview.initialAmount ?? 0) + cashPreview.totals.totalRevenue)}
+                  </span>
+                </div>
               </div>
 
               {/* Note input */}
@@ -2455,7 +2739,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                   disabled={isClosingCash || cashPreview.totals.orderCount === 0}
                   className={`flex-1 px-4 py-3 ${classes.radiusBtn} bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-black uppercase tracking-widest cursor-pointer disabled:opacity-60 disabled:cursor-wait`}
                 >
-                  {isClosingCash ? 'Cerrando…' : 'Confirmar'}
+                  {isClosingCash ? 'Cerrando…' : 'Confirmar Cierre'}
                 </button>
               </div>
             </motion.div>
@@ -2520,17 +2804,19 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                   <button
                     id="btn-table-modal-close"
                     type="button"
+                    disabled={isSavingTable}
                     onClick={() => setIsTableModalOpen(false)}
-                    className={`px-4 py-2.5 text-xs font-black uppercase tracking-widest ${classes.textMuted} hover:${classes.textPrimary} ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} transition cursor-pointer`}
+                    className={`px-4 py-2.5 text-xs font-black uppercase tracking-widest ${classes.textMuted} hover:${classes.textPrimary} ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} transition cursor-pointer disabled:opacity-50`}
                   >
                     Descartar
                   </button>
                   <button
                     id="btn-table-modal-submit"
                     type="submit"
-                    className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-amber-500 text-zinc-950 hover:bg-amber-400 ${classes.radiusBtn} transition cursor-pointer shadow-md`}
+                    disabled={isSavingTable}
+                    className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-amber-500 text-zinc-950 hover:bg-amber-400 ${classes.radiusBtn} transition cursor-pointer shadow-md disabled:opacity-60 disabled:cursor-wait`}
                   >
-                    Guardar Mesa
+                    {isSavingTable ? 'Guardando…' : 'Guardar Mesa'}
                   </button>
                 </div>
               </form>

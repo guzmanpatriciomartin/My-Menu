@@ -279,6 +279,19 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
           matchingOrders.forEach(o => map.set(o.id, o));
           const sorted = Array.from(map.values()).sort((a,b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
           setActiveOrders(sorted);
+
+          // If old orders were filtered out by the server (e.g. table session was closed), update sessionOrderIds and localStorage
+          const validIds = sorted.map(o => o.id);
+          if (validIds.length !== uniqueIds.length) {
+            setSessionOrderIds(validIds);
+            try {
+              if (validIds.length === 0) {
+                localStorage.removeItem(`mimenu_orders_${establishmentId}_${tableId}`);
+              } else {
+                localStorage.setItem(`mimenu_orders_${establishmentId}_${tableId}`, JSON.stringify(validIds));
+              }
+            } catch (err) {}
+          }
         }
       } catch (err) {
         if ((err as Error).name !== 'AbortError') console.error('fetchSessionOrders error:', err);
