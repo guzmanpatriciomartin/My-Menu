@@ -52,6 +52,7 @@ import { playNewOrderSound, playAlertSound } from './SoundUtility';
 import { useTheme } from '../theme/ThemeContext';
 import ThemeTriggerButton from './ThemeTriggerButton';
 import MetricsDashboard from './MetricsDashboard';
+import { printKitchenTicket, printTableBill } from '../lib/thermalPrint';
 
 interface AdminViewProps {
   onBackToLauncher: () => void;
@@ -125,6 +126,9 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   const [isTableModalOpen, setIsTableModalOpen] = useState(false);
   const [editingTable, setEditingTable] = useState<Partial<Table> | null>(null);
   const [isSavingTable, setIsSavingTable] = useState(false);
+
+  // Table Bill Modal (shown before closing a table)
+  const [billModalTableId, setBillModalTableId] = useState<string | null>(null);
 
   // Filters
   const [menuSearch, setMenuSearch] = useState('');
@@ -272,12 +276,16 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     }
   };
 
-  const handleCloseTableSession = async (tableId: string, tableName: string) => {
-    if (!window.confirm(`¿Estás seguro/a de cerrar manualmente la mesa "${tableName}"?\n\nEsto finalizará la sesión del cliente de forma inmediata y completará los pedidos pendientes.`)) {
-      return;
-    }
+  // Opens the bill modal; actual close happens in confirmCloseTableFromModal.
+  const handleCloseTableSession = (tableId: string, _tableName: string) => {
+    setBillModalTableId(tableId);
+  };
+
+  const confirmCloseTableFromModal = async () => {
+    if (!billModalTableId) return;
+    setBillModalTableId(null);
     try {
-      const res = await fetch(`/api/tables/${tableId}/close`, {
+      const res = await fetch(`/api/tables/${billModalTableId}/close`, {
         method: 'POST',
         credentials: 'include'
       });
@@ -610,6 +618,25 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   const activeOrdersList = useMemo(() => {
     return orders.filter(o => o.status !== 'Entregado' && o.status !== 'Cancelado');
   }, [orders]);
+
+  // Orders for the bill modal (mirrors getTableOccupancy filter logic)
+  const billModalOrders = useMemo(() => {
+    if (!billModalTableId) return [];
+    const tableObj = tables.find(t => t.id === billModalTableId);
+    const lastClosedAtMs = tableObj?.lastClosedAt ? new Date(tableObj.lastClosedAt).getTime() : 0;
+    return orders.filter(
+      o =>
+        o.tableId === billModalTableId &&
+        o.status !== 'Cancelado' &&
+        !o.cashCloseId &&
+        (lastClosedAtMs === 0 || new Date(o.createdAt).getTime() > lastClosedAtMs)
+    );
+  }, [billModalTableId, tables, orders]);
+
+  const billModalTable = useMemo(
+    () => (billModalTableId ? tables.find(t => t.id === billModalTableId) ?? null : null),
+    [billModalTableId, tables]
+  );
 
   const pendingCalls = useMemo(() => {
     return tableCalls.filter(c => c.status === 'pending');
@@ -1379,6 +1406,15 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
 
                           <div className="flex items-center gap-2 shrink-0">
                             <button
+                              id={`btn-print-kitchen-${ord.id}`}
+                              onClick={() => printKitchenTicket(ord)}
+                              className={`p-2 ${classes.radiusBtn} ${classes.textMuted} hover:text-amber-500 ${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 transition cursor-pointer`}
+                              title="Imprimir comanda para cocina (55mm)"
+                            >
+                              <Printer className="w-3.5 h-3.5" />
+                            </button>
+
+                            <button
                               id={`btn-cancel-order-${ord.id}`}
                               onClick={() => {
                                 setSelectedOrder(ord);
@@ -1519,6 +1555,20 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
 
                         <div className="flex items-center space-x-1">
                           <button
+                            id={`btn-view-bill-${table.id}`}
+                            onClick={() => setBillModalTableId(table.id)}
+                            disabled={!isOccupied}
+                            className={`p-1.5 ${classes.radiusBtn} ${
+                              isOccupied
+                                ? `${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 ${classes.textSecondary} cursor-pointer`
+                                : `${classes.inputBg} border ${classes.borderCard} ${classes.textMuted} cursor-not-allowed opacity-50`
+                            } transition`}
+                            title={isOccupied ? 'Ver cuenta e imprimir ticket' : 'Mesa libre / sin sesión activa'}
+                          >
+                            <Printer className="w-3.5 h-3.5" />
+                          </button>
+
+                          <button
                             id={`btn-close-table-card-${table.id}`}
                             onClick={() => handleCloseTableSession(table.id, table.name)}
                             disabled={!isOccupied}
@@ -1527,7 +1577,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                                 ? 'bg-rose-500/10 border border-rose-500/30 hover:border-rose-500 text-rose-400 cursor-pointer shadow-sm'
                                 : `${classes.inputBg} border ${classes.borderCard} ${classes.textMuted} cursor-not-allowed opacity-50`
                             } text-[10px] font-black uppercase tracking-wider transition`}
-                            title={isOccupied ? 'Cerrar la sesión de la mesa' : 'Mesa libre / sin sesión activa'}
+                            title={isOccupied ? 'Ver cuenta y cerrar la sesión de la mesa' : 'Mesa libre / sin sesión activa'}
                           >
                             {isOccupied ? 'Cerrar Mesa' : 'Mesa Libre'}
                           </button>
@@ -2222,6 +2272,123 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 >
                   Confirmar Cancelación
                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* MODAL: Table Bill (shown before closing a table, or via printer icon) */}
+      <AnimatePresence>
+        {billModalTableId && billModalTable && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 0.5 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setBillModalTableId(null)}
+              className={`absolute inset-0 ${classes.glassOverlay}`}
+            />
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} w-full max-w-md p-6 relative font-sans shadow-2xl max-h-[90vh] overflow-y-auto`}
+            >
+              {/* Header */}
+              <div className={`flex items-center justify-between border-b ${classes.borderCard} pb-4 mb-4`}>
+                <div>
+                  <h3 className={`font-black text-sm uppercase tracking-wider ${classes.textPrimary}`}>
+                    Cuenta — {billModalTable.name}
+                  </h3>
+                  <p className={`text-[10px] ${classes.textMuted} mt-0.5 font-mono`}>
+                    {billModalOrders.length} pedido(s) en esta sesión
+                  </p>
+                </div>
+                <button
+                  onClick={() => setBillModalTableId(null)}
+                  className={`p-1.5 ${classes.radiusBtn} ${classes.textMuted} hover:${classes.textPrimary} transition`}
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {billModalOrders.length === 0 ? (
+                <p className={`text-sm ${classes.textMuted} text-center py-8`}>No hay pedidos activos para esta mesa.</p>
+              ) : (
+                <div className="space-y-4">
+                  {billModalOrders.map((o) => {
+                    const orderTotal = o.items.reduce((s, i) => s + i.price * i.quantity, 0);
+                    return (
+                      <div key={o.id} className={`${classes.inputBg} border ${classes.borderCard} ${classes.radiusCard} p-3`}>
+                        <div className={`flex items-center justify-between mb-2 pb-2 border-b ${classes.borderCard}`}>
+                          <span className={`text-[10px] font-mono font-black ${classes.textMuted} uppercase tracking-wider`}>
+                            Pedido #{o.id.slice(-4).toUpperCase()}
+                          </span>
+                          {o.dinerName && (
+                            <span className="text-[10px] font-bold text-amber-500">{o.dinerName}</span>
+                          )}
+                        </div>
+                        <div className="space-y-1.5">
+                          {o.items.map((i) => (
+                            <div key={i.id} className="flex items-baseline justify-between text-xs">
+                              <span className={`${classes.textSecondary}`}>
+                                <span className="font-mono font-bold text-amber-500 mr-1">{i.quantity}x</span>
+                                {i.name}
+                              </span>
+                              <span className={`font-mono font-bold ${classes.textPrimary} ml-2`}>{formatPrice(i.price * i.quantity)}</span>
+                            </div>
+                          ))}
+                        </div>
+                        <div className={`mt-2 pt-2 border-t ${classes.borderCard} flex justify-between text-[10px]`}>
+                          <span className={`${classes.textMuted} font-mono uppercase font-bold`}>Subtotal</span>
+                          <span className={`font-mono font-bold ${classes.textPrimary}`}>{formatPrice(orderTotal)}</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* Grand total */}
+                  <div className={`border-t-2 ${classes.borderCard} pt-3 flex items-center justify-between`}>
+                    <span className={`text-sm font-black uppercase tracking-wider ${classes.textPrimary}`}>Total</span>
+                    <span className="text-xl font-black text-amber-500 font-mono">
+                      {formatPrice(billModalOrders.reduce((s, o) => s + o.items.reduce((ss, i) => ss + i.price * i.quantity, 0), 0))}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Actions */}
+              <div className={`mt-5 pt-4 border-t ${classes.borderCard} flex flex-wrap items-center justify-between gap-2`}>
+                <button
+                  onClick={() =>
+                    printTableBill(
+                      billModalTable.name,
+                      billModalOrders,
+                      activeEstablishment?.name ?? ''
+                    )
+                  }
+                  className={`flex items-center space-x-2 px-4 py-2.5 ${classes.radiusBtn} text-xs font-black uppercase tracking-widest ${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 ${classes.textSecondary} hover:text-amber-500 transition cursor-pointer`}
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>Imprimir Ticket</span>
+                </button>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setBillModalTableId(null)}
+                    className={`px-4 py-2.5 text-xs font-black uppercase tracking-widest ${classes.textMuted} ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} transition cursor-pointer`}
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    id="btn-confirm-close-from-bill"
+                    onClick={confirmCloseTableFromModal}
+                    className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-rose-600 hover:bg-rose-700 text-white ${classes.radiusBtn} transition cursor-pointer shadow-md`}
+                  >
+                    Cerrar Mesa
+                  </button>
+                </div>
               </div>
             </motion.div>
           </div>
