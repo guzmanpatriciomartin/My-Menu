@@ -480,6 +480,16 @@ async function startServer() {
             .status(409)
             .json({ error: 'La caja se encuentra cerrada. Debe abrir la caja para iniciar un turno antes de cerrarla.' });
         }
+        // The close was computed but could not be persisted, so nothing was recorded and
+        // the orders are still pending. Retrying is safe.
+        if (result.reason === 'storage_error') {
+          return res.status(503).json({
+            error:
+              'No se pudo registrar el cierre: la base de datos rechazó la escritura. ' +
+              'No se guardó nada, podés reintentar. Verificá que las reglas de Firestore ' +
+              'estén desplegadas para las colecciones cashCloses y cashRegisters.',
+          });
+        }
         return res
           .status(409)
           .json({ error: 'No hay pedidos entregados pendientes de cierre' });

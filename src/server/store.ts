@@ -109,7 +109,7 @@ function forFirestore<T extends object>(value: T): Record<string, unknown> {
 export interface CashCloseResult {
   ok: boolean;
   close?: CashClose;
-  reason?: 'empty' | 'not_open';
+  reason?: 'empty' | 'not_open' | 'storage_error';
 }
 
 export interface CashCloseActor {
@@ -976,7 +976,20 @@ class Store {
       initialAmount,
     };
 
-    await setDoc(doc(db, 'cashRegisters', establishmentId), forFirestore(updated));
+    // The register is money state: if the write does not land, memory must not claim the
+    // shift is open. Reporting the failure beats an opaque 500 — the usual cause is the
+    // cashRegisters rule missing from the deployed firestore.rules.
+    try {
+      await setDoc(doc(db, 'cashRegisters', establishmentId), forFirestore(updated));
+    } catch (err) {
+      console.error('[Firestore] openCashRegister write error:', err);
+      return {
+        ok: false,
+        error:
+          'No se pudo guardar la apertura de caja: la base de datos rechazó la escritura. ' +
+          'Verificá que las reglas de Firestore estén desplegadas para la colección cashRegisters.',
+      };
+    }
 
     const idx = this.cashRegisters.findIndex((r) => r.establishmentId === establishmentId);
     if (idx !== -1) {
@@ -1080,16 +1093,23 @@ class Store {
       chunks.push(pending.slice(i, i + BATCH_LIMIT));
     }
 
-    for (let i = 0; i < chunks.length; i++) {
-      const batch = writeBatch(db);
-      if (i === 0) {
-        batch.set(doc(db, 'cashCloses', close.id), forFirestore(close));
-        batch.set(doc(db, 'cashRegisters', establishmentId), forFirestore(updatedRegister));
+    // A failed commit must leave memory untouched: claiming the close happened would
+    // strand the orders with no cashCloseId and let the next close count them again.
+    try {
+      for (let i = 0; i < chunks.length; i++) {
+        const batch = writeBatch(db);
+        if (i === 0) {
+          batch.set(doc(db, 'cashCloses', close.id), forFirestore(close));
+          batch.set(doc(db, 'cashRegisters', establishmentId), forFirestore(updatedRegister));
+        }
+        for (const order of chunks[i]) {
+          batch.set(doc(db, 'orders', order.id), forFirestore({ ...order, cashCloseId: close.id }));
+        }
+        await batch.commit();
       }
-      for (const order of chunks[i]) {
-        batch.set(doc(db, 'orders', order.id), forFirestore({ ...order, cashCloseId: close.id }));
-      }
-      await batch.commit();
+    } catch (err) {
+      console.error('[Firestore] runCashClose batch error:', err);
+      return { ok: false, reason: 'storage_error' };
     }
 
     // Memory after the write succeeded, mirroring the write-then-memory order used by
