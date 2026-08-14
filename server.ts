@@ -109,15 +109,24 @@ async function startServer() {
   // (verifySession) instead of requireAuth so the anonymous diner is not rejected with 401.
   app.get('/api/realtime', (req, res) => {
     const user = verifySession(req);
-    const establishmentId = user
-      ? user.establishmentId
-      : typeof req.query.establishmentId === 'string'
-        ? req.query.establishmentId
-        : '';
-    const tableId = typeof req.query.tableId === 'string' ? req.query.tableId : '';
 
-    if (!user && (!establishmentId || !tableId)) {
-      return res.status(400).json({ error: 'establishmentId y tableId son requeridos' });
+    let establishmentId: string;
+    let tableId: string;
+
+    if (user) {
+      establishmentId = user.establishmentId;
+      tableId = typeof req.query.tableId === 'string' ? req.query.tableId : '';
+    } else {
+      const diinerQueryResult = z.object({
+        establishmentId: z.string().min(1).max(100),
+        tableId: z.string().min(1).max(100),
+      }).safeParse(req.query);
+      if (!diinerQueryResult.success) {
+        res.status(400).json({ error: 'Invalid query parameters' });
+        return;
+      }
+      establishmentId = diinerQueryResult.data.establishmentId;
+      tableId = diinerQueryResult.data.tableId;
     }
 
     res.setHeader('Content-Type', 'text/event-stream');

@@ -241,13 +241,15 @@ export function getVenueIsoDate(offsetDays: number = 0, hour: number = 12, minut
   
   const baseDate = new Date(Date.UTC(y, m - 1, d + offsetDays));
   const year = baseDate.getUTCFullYear();
-  const month = String(baseDate.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(baseDate.getUTCDate()).padStart(2, '0');
-  const h = String(hour).padStart(2, '0');
-  const min = String(minute).padStart(2, '0');
-  
-  // Argentina is UTC-3 year-round
-  return new Date(`${year}-${month}-${day}T${h}:${min}:00-03:00`).toISOString();
+  const month = baseDate.getUTCMonth() + 1;
+  const day = baseDate.getUTCDate();
+
+  // Convertir hora local Argentina (UTC-3) a UTC sumando 3 horas
+  const utcHour = hour + 3;
+  const date = new Date(Date.UTC(year, month - 1, day, utcHour % 24, minute, 0));
+  // Si utcHour >= 24, agregar un día
+  if (utcHour >= 24) date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString();
 }
 
 /**
@@ -840,7 +842,68 @@ export function generateSeedTableCalls(): TableCall[] {
 }
 
 export function generateSeedCashCloses(): CashClose[] {
-  return [
+  const allOrders = generateSeedOrders();
+  const orderMap = new Map(allOrders.map((o) => [o.id, o]));
+
+  function computeClose(orderIds: string[]): {
+    totals: CashCloseTotals;
+    topProducts: ProductLine[];
+    byTable: TableLine[];
+  } {
+    const orders = orderIds
+      .map((id) => orderMap.get(id))
+      .filter((o): o is Order => o !== undefined);
+
+    let totalRevenue = 0;
+    const productMap = new Map<string, { name: string; units: number; revenue: number }>();
+    const tableMap = new Map<string, { tableName: string; orderCount: number; revenue: number }>();
+
+    for (const order of orders) {
+      const orderRevenue = order.items.reduce((s, i) => s + i.price * i.quantity, 0);
+      totalRevenue += orderRevenue;
+
+      for (const item of order.items) {
+        const p = productMap.get(item.menuItemId);
+        if (p) {
+          p.units += item.quantity;
+          p.revenue += item.price * item.quantity;
+        } else {
+          productMap.set(item.menuItemId, {
+            name: item.name,
+            units: item.quantity,
+            revenue: item.price * item.quantity,
+          });
+        }
+      }
+
+      const t = tableMap.get(order.tableId);
+      if (t) {
+        t.orderCount += 1;
+        t.revenue += orderRevenue;
+      } else {
+        tableMap.set(order.tableId, {
+          tableName: order.tableName,
+          orderCount: 1,
+          revenue: orderRevenue,
+        });
+      }
+    }
+
+    const orderCount = orders.length;
+    const averageTicket = orderCount === 0 ? 0 : totalRevenue / orderCount;
+
+    const topProducts: ProductLine[] = [...productMap.entries()]
+      .map(([menuItemId, p]) => ({ menuItemId, name: p.name, units: p.units, revenue: p.revenue }))
+      .sort((a, b) => b.units - a.units);
+
+    const byTable: TableLine[] = [...tableMap.entries()]
+      .map(([tableId, t]) => ({ tableId, tableName: t.tableName, orderCount: t.orderCount, revenue: t.revenue }))
+      .sort((a, b) => b.revenue - a.revenue);
+
+    return { totals: { orderCount, totalRevenue, averageTicket }, topProducts, byTable };
+  }
+
+  const closes: CashClose[] = [
     {
       id: 'close-pal-almuerzo-today',
       establishmentId: 'bodegon-palermo',
@@ -849,25 +912,8 @@ export function generateSeedCashCloses(): CashClose[] {
       closedByRole: 'waiter',
       periodStart: getVenueIsoDate(0, 12, 0),
       periodEnd: getVenueIsoDate(0, 15, 30),
-      totals: {
-        orderCount: 4,
-        totalRevenue: 64900,
-        averageTicket: 16225,
-      },
       orderIds: ['ord-pal-today-1', 'ord-pal-today-2', 'ord-pal-today-3', 'ord-pal-today-4'],
-      topProducts: [
-        { menuItemId: 'item-palermo-bife', name: 'Bife de Chorizo Clásico (400g)', units: 2, revenue: 25000 },
-        { menuItemId: 'item-palermo-mila-napo', name: 'Milanesa de Ternera a la Napolitana', units: 2, revenue: 19600 },
-        { menuItemId: 'item-palermo-ipa', name: 'Cerveza Tirada IPA (Pinta)', units: 5, revenue: 12500 },
-        { menuItemId: 'item-palermo-provoleta', name: 'Provoleta Clásica al Hierro', units: 2, revenue: 9000 },
-        { menuItemId: 'item-palermo-empanada', name: 'Empanada de Carne Cortada a Cuchillo', units: 5, revenue: 6500 },
-      ],
-      byTable: [
-        { tableId: 'tab-pal-2', tableName: 'Mesa 2', orderCount: 1, revenue: 41800 },
-        { tableId: 'tab-pal-3', tableName: 'Mesa 3', orderCount: 1, revenue: 15300 },
-        { tableId: 'tab-pal-1', tableName: 'Mesa 1', orderCount: 1, revenue: 17400 },
-        { tableId: 'tab-pal-sub', tableName: 'Mesa Barra 1', orderCount: 1, revenue: 8900 },
-      ],
+      ...computeClose(['ord-pal-today-1', 'ord-pal-today-2', 'ord-pal-today-3', 'ord-pal-today-4']),
       note: 'Cierre de turno mediodía sin discrepancias en caja.',
       createdAt: getVenueIsoDate(0, 15, 30),
     },
@@ -879,26 +925,8 @@ export function generateSeedCashCloses(): CashClose[] {
       closedByRole: 'admin',
       periodStart: getVenueIsoDate(-1, 12, 0),
       periodEnd: getVenueIsoDate(-1, 23, 45),
-      totals: {
-        orderCount: 6,
-        totalRevenue: 138600,
-        averageTicket: 23100,
-      },
       orderIds: ['ord-pal-yest-1', 'ord-pal-yest-2', 'ord-pal-yest-3', 'ord-pal-yest-4', 'ord-pal-yest-5', 'ord-pal-yest-6'],
-      topProducts: [
-        { menuItemId: 'item-palermo-bife', name: 'Bife de Chorizo Clásico (400g)', units: 3, revenue: 37500 },
-        { menuItemId: 'item-palermo-mila-napo', name: 'Milanesa de Ternera a la Napolitana', units: 5, revenue: 49000 },
-        { menuItemId: 'item-palermo-ipa', name: 'Cerveza Tirada IPA (Pinta)', units: 8, revenue: 20000 },
-        { menuItemId: 'item-palermo-provoleta', name: 'Provoleta Clásica al Hierro', units: 3, revenue: 13500 },
-        { menuItemId: 'item-palermo-empanada', name: 'Empanada de Carne Cortada a Cuchillo', units: 10, revenue: 13000 },
-      ],
-      byTable: [
-        { tableId: 'tab-pal-2', tableName: 'Mesa 2', orderCount: 1, revenue: 43900 },
-        { tableId: 'tab-pal-4', tableName: 'Mesa 4', orderCount: 1, revenue: 35400 },
-        { tableId: 'tab-pal-5', tableName: 'Mesa 5', orderCount: 1, revenue: 26800 },
-        { tableId: 'tab-pal-1', tableName: 'Mesa 1', orderCount: 2, revenue: 42100 },
-        { tableId: 'tab-pal-3', tableName: 'Mesa 3', orderCount: 1, revenue: 8800 },
-      ],
+      ...computeClose(['ord-pal-yest-1', 'ord-pal-yest-2', 'ord-pal-yest-3', 'ord-pal-yest-4', 'ord-pal-yest-5', 'ord-pal-yest-6']),
       note: 'Cierre nocturno general. Gran concurrencia en salón.',
       createdAt: getVenueIsoDate(-1, 23, 45),
     },
@@ -910,25 +938,46 @@ export function generateSeedCashCloses(): CashClose[] {
       closedByRole: 'waiter',
       periodStart: getVenueIsoDate(0, 8, 30),
       periodEnd: getVenueIsoDate(0, 13, 0),
-      totals: {
-        orderCount: 2,
-        totalRevenue: 13500,
-        averageTicket: 6750,
-      },
       orderIds: ['ord-caf-today-1', 'ord-caf-today-2'],
-      topProducts: [
-        { menuItemId: 'item-cafe-flatwhite', name: 'Avocado Flat White', units: 2, revenue: 4200 },
-        { menuItemId: 'item-cafe-croissant', name: 'Croissant Hojaldrado de Pistachos', units: 2, revenue: 5000 },
-        { menuItemId: 'item-cafe-coldbrew', name: 'Cold Brew Tonic & Grapefruit', units: 1, revenue: 2300 },
-        { menuItemId: 'item-cafe-cinnamon', name: 'Roll de Canela y Pacanas', units: 1, revenue: 2000 },
-      ],
-      byTable: [
-        { tableId: 'tab-caf-1', tableName: 'Mesa A1', orderCount: 1, revenue: 9200 },
-        { tableId: 'tab-caf-3', tableName: 'Mesa de Ventana', orderCount: 1, revenue: 4300 },
-      ],
+      ...computeClose(['ord-caf-today-1', 'ord-caf-today-2']),
       note: 'Turno mañana café de especialidad finalizado.',
       createdAt: getVenueIsoDate(0, 13, 0),
     },
+    // D-1: close-caf-cierre-ayer (was missing — referenced by ord-caf-yest-1 and ord-caf-yest-2)
+    {
+      id: 'close-caf-cierre-ayer',
+      establishmentId: 'cafe-speakeasy',
+      closedByEmail: 'sofia@mimenu.com',
+      closedByName: 'Sofía (Admin)',
+      closedByRole: 'admin',
+      periodStart: getVenueIsoDate(-1, 10, 0),
+      periodEnd: getVenueIsoDate(-1, 21, 0),
+      orderIds: ['ord-caf-yest-1', 'ord-caf-yest-2'],
+      ...computeClose(['ord-caf-yest-1', 'ord-caf-yest-2']),
+      createdAt: getVenueIsoDate(-1, 21, 0),
+    },
+    // D-1: close-pal-hist--N (days -2 to -7, were missing — referenced by flatMap of historical orders)
+    ...[-2, -3, -4, -5, -6, -7].map((d): CashClose => {
+      const orderIds = [
+        `ord-pal-hist-${d}-1`,
+        `ord-pal-hist-${d}-2`,
+        `ord-pal-hist-${d}-3`,
+      ];
+      return {
+        id: `close-pal-hist-${d}`,
+        establishmentId: 'bodegon-palermo',
+        closedByEmail: 'carolina@mimenu.com',
+        closedByName: 'Carolina (Admin)',
+        closedByRole: 'admin',
+        periodStart: getVenueIsoDate(d, 13, 0),
+        periodEnd: getVenueIsoDate(d, 22, 30),
+        orderIds,
+        ...computeClose(orderIds),
+        createdAt: getVenueIsoDate(d, 22, 30),
+      };
+    }),
   ];
+
+  return closes;
 }
 

@@ -34,6 +34,9 @@ export function playNewOrderSound() {
       gain2.connect(ctx.destination);
       osc2.start();
       osc2.stop(ctx.currentTime + 0.6);
+      osc2.onended = () => {
+        setTimeout(() => { try { ctx.close(); } catch (_) {} }, 500);
+      };
     }, 150);
 
   } catch (err) {
@@ -59,9 +62,12 @@ export function playAlertSound() {
 
     osc.connect(gain);
     gain.connect(ctx.destination);
-    
+
     osc.start();
     osc.stop(ctx.currentTime + 0.3);
+    osc.onended = () => {
+      setTimeout(() => { try { ctx.close(); } catch (_) {} }, 500);
+    };
   } catch (err) {
     // blocked or unsupported
   }

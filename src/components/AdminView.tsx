@@ -125,6 +125,10 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   const orderCountRef = useRef<number>(0);
   const callCountRef = useRef<number>(0);
 
+  // Refs to avoid stale closures in the long-lived SSE useEffect (F-6)
+  const soundEnabledRef = useRef(soundEnabled);
+  const activeTabRef = useRef(activeTab);
+
   // Real auth against the server (RF-A01, RF-A13 role validation).
   const doLogin = async (emailToUse: string, passwordToUse: string) => {
     setLoginError('');
@@ -311,6 +315,10 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     if (activeTab === 'metricas' && currentUser.role === 'admin') fetchMetrics(metricsDay || undefined);
   }, [activeTab, currentUser]);
 
+  // Keep refs in sync so the SSE closure always reads current values without reconnecting (F-6)
+  useEffect(() => { soundEnabledRef.current = soundEnabled; }, [soundEnabled]);
+  useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
+
   // SSE handler for instantaneous real-time refresh (RF-A03, RF-C08)
   useEffect(() => {
     if (!currentUser) return;
@@ -321,17 +329,19 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
         try {
           const msg = JSON.parse(event.data);
           if ((msg.type === 'ORDER_CREATED' || msg.type === 'TABLE_CALL_CREATED') && msg.payload.establishmentId === activeEstId) {
-            // Hot trigger sound and pull fresh lists
-            if (soundEnabled) playNewOrderSound();
+            // Pull fresh lists; sound is handled inside fetchDbState via orderCountRef comparison (F-1)
             fetchDbState();
-            if (activeTab === 'caja') fetchCashState();
+            if (activeTabRef.current === 'caja') fetchCashState();
           } else if ((msg.type === 'ORDER_STATUS_CHANGED' || msg.type === 'TABLE_SESSION_CLOSED' || msg.type === 'CASH_CLOSED') && msg.payload.establishmentId === activeEstId) {
             fetchDbState();
-            if (activeTab === 'caja') fetchCashState();
+            if (activeTabRef.current === 'caja') fetchCashState();
           }
         } catch (e) {
           // ignore parsing error
         }
+      };
+      sse.onerror = () => {
+        // The browser automatically retries according to the SSE spec
       };
     } catch (e) {
       console.error('SSE connection failed in admin', e);
@@ -340,7 +350,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     return () => {
       if (sse) sse.close();
     };
-  }, [currentUser, activeEstId, soundEnabled, activeTab]);
+  }, [currentUser, activeEstId]);
 
   // Transition order progress (RF-A05)
   const handleAdvanceStatus = async (order: Order) => {
@@ -395,12 +405,15 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
             ...itemToDisable,
             available: false
           };
-          await fetch('/api/menu-items', {
+          const itemRes = await fetch('/api/menu-items', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
             body: JSON.stringify(payload)
           });
+          if (!itemRes.ok) {
+            console.error('Failed to disable menu item after cancellation');
+          }
         }
       }
 
@@ -421,7 +434,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   // Menu Item mutations (CRUD)
   const handleSaveMenuItem = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!editingItem || !editingItem.name || editingItem.price === undefined) return;
+    if (!editingItem || !editingItem.name || editingItem.price == null || isNaN(editingItem.price)) return;
 
     const payload = {
       ...editingItem,
@@ -2071,7 +2084,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               initial={{ opacity: 0 }}
               animate={{ opacity: 0.5 }}
               exit={{ opacity: 0 }}
-              onClick={() => setIsCancelModalOpen(false)}
+              onClick={() => { setIsCancelModalOpen(false); setCancellationReason(''); setDisableItemOnCancelId(''); }}
               className={`absolute inset-0 ${classes.glassOverlay}`}
             />
 
@@ -2200,8 +2213,11 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                   <input
                     id="input-category-order"
                     type="number"
-                    value={editingCategory.order || ''}
-                    onChange={(e) => setEditingCategory(prev => ({ ...prev, order: parseInt(e.target.value) }))}
+                    value={editingCategory.order ?? ''}
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value, 10);
+                      setEditingCategory(prev => ({ ...prev, order: isNaN(val) ? 0 : val }));
+                    }}
                     className={`w-full ${classes.inputBg} border ${classes.inputBorder} p-3 ${classes.radiusCard} text-xs outline-none focus:border-amber-500 font-mono ${classes.textPrimary}`}
                     placeholder="Ej. 1"
                   />
@@ -2309,8 +2325,11 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       id="input-item-price"
                       type="number"
                       required
-                      value={editingItem.price || ''}
-                      onChange={(e) => setEditingItem(prev => ({ ...prev, price: parseFloat(e.target.value) }))}
+                      value={editingItem.price ?? ''}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value);
+                        setEditingItem(prev => ({ ...prev, price: isNaN(val) ? undefined : val }));
+                      }}
                       className={`w-full ${classes.inputBg} border ${classes.inputBorder} p-3 ${classes.radiusCard} text-xs outline-none focus:border-amber-500 font-mono ${classes.textPrimary}`}
                     />
                   </div>

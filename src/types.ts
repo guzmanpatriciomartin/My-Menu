@@ -54,7 +54,8 @@ export interface Order {
   cancellationReason?: string;
   createdAt: string;
   updatedAt: string;
-  paymentStatus: 'pending' | 'paid' | null; // Placeholder for v1.1 roadmap
+  // 'pending' reservado para v1.1 — actualmente los pedidos se crean con null y se pagan directamente
+  paymentStatus: 'pending' | 'paid' | null;
   deliveredAt?: string;
   cashCloseId?: string | null;
 }
@@ -138,9 +139,9 @@ export interface MetricsSummary {
 export type UserRole = 'admin' | 'waiter';
 
 export interface UserSession {
-  id: string;
+  id?: string;
   email: string;
-  name: string;
+  name?: string;
   role: UserRole;
   establishmentId: string; // Managed venue
 }

@@ -55,9 +55,10 @@ export function computeTotals(orders: Order[]): CashCloseTotals {
 }
 
 export function computeTopProducts(orders: Order[]): ProductLine[] {
+  const revenueOrders = orders.filter(isRevenueOrder);
   const byProduct = new Map<string, ProductLine>();
 
-  for (const order of orders) {
+  for (const order of revenueOrders) {
     for (const item of order.items) {
       const current = byProduct.get(item.menuItemId);
       const revenue = item.price * item.quantity;
@@ -81,9 +82,10 @@ export function computeTopProducts(orders: Order[]): ProductLine[] {
 }
 
 export function computeByTable(orders: Order[]): TableLine[] {
+  const revenueOrders = orders.filter(isRevenueOrder);
   const byTable = new Map<string, TableLine>();
 
-  for (const order of orders) {
+  for (const order of revenueOrders) {
     const revenue = orderRevenue(order);
     const current = byTable.get(order.tableId);
     if (current) {
@@ -111,9 +113,10 @@ export function computeByHour(orders: Order[]): HourLine[] {
   }));
 
   for (const order of orders) {
-    const bucket = buckets[venueHour(saleTimestamp(order))];
-    bucket.orderCount += 1;
-    bucket.revenue += orderRevenue(order);
+    const hour = venueHour(saleTimestamp(order));
+    if (hour < 0 || hour > 23) continue;
+    buckets[hour].orderCount += 1;
+    buckets[hour].revenue += orderRevenue(order);
   }
 
   return buckets;
@@ -140,7 +143,7 @@ export function computeComparison(
     const from = new Date(bounds.from).getTime();
     const cappedTo = Math.min(from + elapsedMs, new Date(bounds.to).getTime());
     const window = deliveredInRange(allOrders, bounds.from, new Date(cappedTo).toISOString());
-    return window.length === 0 ? null : computeTotals(window).totalRevenue;
+    return window.length === 0 ? 0 : computeTotals(window).totalRevenue;
   };
 
   const yesterdayRevenue = previousDayBounds ? revenueUpTo(previousDayBounds) : null;

@@ -72,7 +72,7 @@ export function venueDay(date: Date = new Date()): string {
 
 export function venueHour(iso: string): number {
   const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return 0;
+  if (Number.isNaN(date.getTime())) return -1;
   return localParts(date).hour;
 }
 

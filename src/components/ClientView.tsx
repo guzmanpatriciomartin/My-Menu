@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Search, 
@@ -207,34 +207,56 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
   });
 
   const [activeOrders, setActiveOrders] = useState<Order[]>([]);
+  // F-13: moved here so it is declared before any function that uses it
+  const [showSuccessBadge, setShowSuccessBadge] = useState(false);
 
-  // Fetch initial establishment data
-  const loadData = async () => {
-    try {
-      const [estRes, catRes, menuRes, tabRes] = await Promise.all([
-        fetch(`/api/establishments/${establishmentId}`).then(r => r.json()),
-        fetch(`/api/establishments/${establishmentId}/categories`).then(r => r.json()),
-        fetch(`/api/establishments/${establishmentId}/menu-items`).then(r => r.json()),
-        fetch(`/api/establishments/${establishmentId}/tables`).then(r => r.json())
-      ]);
+  // F-2: ref to avoid stale closure in SSE handler
+  const sessionOrderIdsRef = useRef<string[]>(sessionOrderIds);
+  // F-3: refs for setTimeout handles to enable cleanup
+  const addedItemTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const callNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showSuccessBadgeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-      setEstablishment(estRes);
-      setCategories(catRes);
-      setMenuItems(menuRes);
-      setTables(tabRes);
-    } catch (e) {
-      console.error('Error fetching client data', e);
-    } finally {
-      setLoading(false);
-    }
-  };
+  // F-2: keep sessionOrderIdsRef in sync so SSE handler never reads stale value
+  useEffect(() => { sessionOrderIdsRef.current = sessionOrderIds; }, [sessionOrderIds]);
 
+  // F-3: cleanup all pending timers on unmount
+  useEffect(() => () => {
+    if (addedItemTimerRef.current) clearTimeout(addedItemTimerRef.current);
+    if (callNoticeTimerRef.current) clearTimeout(callNoticeTimerRef.current);
+    if (showSuccessBadgeTimerRef.current) clearTimeout(showSuccessBadgeTimerRef.current);
+  }, []);
+
+  // Fetch initial establishment data (F-5: cancelled flag prevents state updates after unmount)
   useEffect(() => {
+    let cancelled = false;
+    const loadData = async () => {
+      try {
+        const [estRes, catRes, menuRes, tabRes] = await Promise.all([
+          fetch(`/api/establishments/${establishmentId}`).then(r => r.json()),
+          fetch(`/api/establishments/${establishmentId}/categories`).then(r => r.json()),
+          fetch(`/api/establishments/${establishmentId}/menu-items`).then(r => r.json()),
+          fetch(`/api/establishments/${establishmentId}/tables`).then(r => r.json())
+        ]);
+        if (!cancelled) {
+          setEstablishment(estRes);
+          setCategories(catRes);
+          setMenuItems(menuRes);
+          setTables(tabRes);
+          setLoading(false);
+        }
+      } catch (e) {
+        if (!cancelled) console.error('Error loading client data', e);
+      }
+    };
     loadData();
+    return () => { cancelled = true; };
   }, [establishmentId]);
 
-  // Sync active orders from sessionOrderIds
+  // Sync active orders from sessionOrderIds (F-4: AbortController prevents stale responses)
   useEffect(() => {
+    let abortController = new AbortController();
+
     const fetchSessionOrders = async () => {
       if (sessionOrderIds.length === 0) {
         setActiveOrders([]);
@@ -242,13 +264,15 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
       }
       try {
         const uniqueIds = Array.from(new Set(sessionOrderIds));
-        // F-4: scoped lookup — we only ask for OUR own order ids on OUR table.
+        // Scoped lookup — we only ask for OUR own order ids on OUR table.
         // The server never enumerates other diners' orders.
         const res = await fetch(`/api/establishments/${establishmentId}/orders/lookup`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ tableId, orderIds: uniqueIds }),
+          signal: abortController.signal,
         });
+        if (!res.ok) return;
         const matchingOrders: Order[] = await res.json();
         if (Array.isArray(matchingOrders)) {
           const map = new Map<string, Order>();
@@ -257,7 +281,7 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
           setActiveOrders(sorted);
         }
       } catch (err) {
-        console.error('Error loading session orders:', err);
+        if ((err as Error).name !== 'AbortError') console.error('fetchSessionOrders error:', err);
       }
     };
 
@@ -265,7 +289,10 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
 
     // Set up short polling (fallback in case socket closed or SSE delayed, giving absolute guarantee)
     const interval = setInterval(fetchSessionOrders, 4000);
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      abortController.abort();
+    };
   }, [sessionOrderIds, establishmentId, tableId]);
 
   // Connect to SSE for instant real-time status updates (RF-C08)
@@ -301,7 +328,8 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
             });
           } else if (msg.type === 'ORDER_STATUS_CHANGED') {
             const updatedOrder: Order = msg.payload.order;
-            if (sessionOrderIds.includes(updatedOrder.id)) {
+            // F-2: use ref to avoid stale closure — no reconnection on every new order
+            if (sessionOrderIdsRef.current.includes(updatedOrder.id)) {
               setActiveOrders(prev => {
                 const map = new Map<string, Order>();
                 prev.forEach(o => map.set(o.id, o));
@@ -310,10 +338,11 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
               });
             }
           } else if (msg.type === 'MENU_CHANGED' && msg.payload.establishmentId === establishmentId) {
-            // Hot reload menu availability in real-time
+            // Hot reload menu availability in real-time (F-7: handle fetch errors)
             fetch(`/api/establishments/${establishmentId}/menu-items`)
-              .then(r => r.json())
-              .then(items => setMenuItems(items));
+              .then(r => { if (!r.ok) throw new Error('menu fetch failed'); return r.json(); })
+              .then(items => { if (Array.isArray(items)) setMenuItems(items); })
+              .catch(err => console.warn('Failed to reload menu items:', err));
           } else if (msg.type === 'TABLE_SESSION_CLOSED' && msg.payload.establishmentId === establishmentId) {
             if (!msg.payload.tableId || msg.payload.tableId === tableId) {
               const closedAt = msg.payload.closedAt || new Date().toISOString();
@@ -327,6 +356,11 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
           // ignore parsing errors
         }
       };
+
+      // F-10: handle SSE connection errors (browser auto-retries per spec)
+      sse.onerror = () => {
+        // No visual state update needed; browser will reconnect automatically
+      };
     } catch (e) {
       console.warn('Real-time updates failed to initialize', e);
     }
@@ -334,7 +368,8 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
     return () => {
       if (sse) sse.close();
     };
-  }, [sessionOrderIds, establishmentId, tableId]);
+  // F-2: sessionOrderIds removed from deps — stale closure solved via sessionOrderIdsRef
+  }, [establishmentId, tableId]);
 
   // Solve correct table name
   const tableName = useMemo(() => {
@@ -378,7 +413,8 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
     });
 
     setAddedItemName(product.name);
-    setTimeout(() => {
+    if (addedItemTimerRef.current) clearTimeout(addedItemTimerRef.current);
+    addedItemTimerRef.current = setTimeout(() => {
       setAddedItemName(null);
     }, 2500);
   };
@@ -492,7 +528,8 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
       if (res.ok) {
         const msg = type === 'waiter_call' ? '🛎️ ¡Se ha notificado al mozo!' : '🧾 ¡Se ha solicitado la cuenta!';
         setCallNotice(msg);
-        setTimeout(() => setCallNotice(null), 3500);
+        if (callNoticeTimerRef.current) clearTimeout(callNoticeTimerRef.current);
+        callNoticeTimerRef.current = setTimeout(() => setCallNotice(null), 3500);
       }
     } catch (err) {
       console.error('Error sending call', err);
@@ -532,7 +569,11 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
         // Some items became unavailable between browsing and checkout.
         await res.json().catch(() => null);
         alert('Algunos ítems ya no están disponibles. Actualizamos el menú, revisá tu pedido.');
-        loadData();
+        // Only refresh menu items — no need to reload all data
+        fetch(`/api/establishments/${establishmentId}/menu-items`)
+          .then(r => r.json())
+          .then(items => { if (Array.isArray(items)) setMenuItems(items); })
+          .catch(err => console.warn('Failed to reload menu items after 409:', err));
         return;
       }
 
@@ -560,7 +601,8 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
 
       // Trigger temporary success screen
       setShowSuccessBadge(true);
-      setTimeout(() => {
+      if (showSuccessBadgeTimerRef.current) clearTimeout(showSuccessBadgeTimerRef.current);
+      showSuccessBadgeTimerRef.current = setTimeout(() => {
         setShowSuccessBadge(false);
       }, 5000);
 
@@ -571,8 +613,6 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
       setOrderSubmitting(false);
     }
   };
-
-  const [showSuccessBadge, setShowSuccessBadge] = useState(false);
 
   // Helpers for order state visualization
   const getStatusColor = (status: OrderStatus) => {
@@ -1238,6 +1278,7 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
                   id="input-diner-name"
                   type="text"
                   required
+                  maxLength={60}
                   placeholder="Ej: Juan / María"
                   value={nameInput}
                   onChange={(e) => setNameInput(e.target.value)}

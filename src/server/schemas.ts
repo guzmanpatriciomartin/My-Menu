@@ -23,8 +23,8 @@ export type LoginInput = z.infer<typeof loginSchema>;
 const orderDraftItemSchema = z
   .object({
     menuItemId: nonEmpty,
-    quantity: z.number().int().positive().max(100000),
-    comment: z.string().max(2000).optional(),
+    quantity: z.number().int().positive().max(99),
+    comment: z.string().max(200).optional(),
   })
   .strict();
 

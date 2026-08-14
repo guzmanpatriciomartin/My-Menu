@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto';
 import { db } from '../lib/firebase';
 import {
   collection,
@@ -112,7 +113,6 @@ export interface CashClosePreview {
   periodStart: string;
   periodEnd: string;
   totals: CashCloseTotals;
-  orderCount: number;
   topProducts: ProductLine[];
   byTable: TableLine[];
 }
@@ -130,13 +130,13 @@ export interface CashCloseActor {
 export interface CreateOrderResult {
   ok: boolean;
   order?: Order;
-  reason?: 'invalid_table' | 'unavailable_items';
+  reason?: 'invalid_table' | 'unavailable_items' | 'storage_error';
   unavailableItems?: string[];
 }
 
 // CASH_CLOSED is admin-only by construction: shouldDeliver() whitelists what a diner
 // may receive, so anything not listed there (this included) never reaches that channel.
-type NotifyType = 'ORDER_CREATED' | 'ORDER_STATUS_CHANGED' | 'MENU_CHANGED' | 'TABLES_CHANGED' | 'TABLE_CALL_CREATED' | 'TABLE_SESSION_CLOSED' | 'CASH_CLOSED';
+type NotifyType = 'ORDER_CREATED' | 'ORDER_STATUS_CHANGED' | 'MENU_CHANGED' | 'TABLES_CHANGED' | 'TABLE_CALL_CREATED' | 'TABLE_CALL_UPDATED' | 'TABLE_SESSION_CLOSED' | 'CASH_CLOSED';
 
 interface NotifyPayload {
   establishmentId: string;
@@ -172,7 +172,7 @@ class Store {
   private sseClients: SseClient[] = [];
   private tableCalls: TableCall[] = generateSeedTableCalls();
   private cashCloses: CashClose[] = generateSeedCashCloses();
-  private closedSessions: Map<string, string> = new Map();
+  private closedSessions: Map<string, { closedAt: string; timestamp: number }> = new Map();
 
   // Serializes cash closes per tenant: two waiters hitting "Cerrar caja" at the same
   // instant must not both stamp the same orders. The second one waits, then finds an
@@ -204,12 +204,9 @@ class Store {
       collection(db, 'establishments'),
       (snap) => {
         const docs = snap.docs.map((d) => d.data() as Establishment);
-        if (docs.length > 0) {
-          const map = new Map<string, Establishment>();
-          docs.forEach((d) => map.set(d.id, d));
-          this.data.establishments.forEach((d) => { if (!map.has(d.id)) map.set(d.id, d); });
-          this.data.establishments = Array.from(map.values());
-        }
+        const map = new Map<string, Establishment>();
+        docs.forEach((d) => map.set(d.id, d));
+        this.data.establishments = Array.from(map.values());
       },
       (err) => console.error('[Firestore establishments listener]', err)
     );
@@ -217,12 +214,9 @@ class Store {
       collection(db, 'categories'),
       (snap) => {
         const docs = snap.docs.map((d) => d.data() as Category);
-        if (docs.length > 0) {
-          const map = new Map<string, Category>();
-          docs.forEach((d) => map.set(d.id, d));
-          this.data.categories.forEach((d) => { if (!map.has(d.id)) map.set(d.id, d); });
-          this.data.categories = Array.from(map.values());
-        }
+        const map = new Map<string, Category>();
+        docs.forEach((d) => map.set(d.id, d));
+        this.data.categories = Array.from(map.values());
       },
       (err) => console.error('[Firestore categories listener]', err)
     );
@@ -230,12 +224,9 @@ class Store {
       collection(db, 'menuItems'),
       (snap) => {
         const docs = snap.docs.map((d) => d.data() as MenuItem);
-        if (docs.length > 0) {
-          const map = new Map<string, MenuItem>();
-          docs.forEach((d) => map.set(d.id, d));
-          this.data.menuItems.forEach((d) => { if (!map.has(d.id)) map.set(d.id, d); });
-          this.data.menuItems = Array.from(map.values());
-        }
+        const map = new Map<string, MenuItem>();
+        docs.forEach((d) => map.set(d.id, d));
+        this.data.menuItems = Array.from(map.values());
       },
       (err) => console.error('[Firestore menuItems listener]', err)
     );
@@ -243,12 +234,9 @@ class Store {
       collection(db, 'tables'),
       (snap) => {
         const docs = snap.docs.map((d) => d.data() as Table);
-        if (docs.length > 0) {
-          const map = new Map<string, Table>();
-          docs.forEach((d) => map.set(d.id, d));
-          this.data.tables.forEach((d) => { if (!map.has(d.id)) map.set(d.id, d); });
-          this.data.tables = Array.from(map.values());
-        }
+        const map = new Map<string, Table>();
+        docs.forEach((d) => map.set(d.id, d));
+        this.data.tables = Array.from(map.values());
       },
       (err) => console.error('[Firestore tables listener]', err)
     );
@@ -343,6 +331,7 @@ class Store {
     };
     this.tableCalls = generateSeedTableCalls();
     this.cashCloses = generateSeedCashCloses();
+    this.closedSessions.clear();
     console.log('[Firestore] Force-seed complete.');
     return true;
   }
@@ -415,7 +404,7 @@ class Store {
       const comment = draft.comment ? draft.comment.slice(0, 200) : undefined;
 
       resolvedItems.push({
-        id: 'orditem-' + Math.random().toString(36).substring(2, 9),
+        id: 'orditem-' + randomUUID(),
         menuItemId: menuItem.id,
         name: menuItem.name,
         price: menuItem.price,
@@ -430,7 +419,7 @@ class Store {
 
     const now = new Date().toISOString();
     const newOrder: Order = {
-      id: 'ord-' + Math.random().toString(36).substring(2, 9),
+      id: 'ord-' + randomUUID(),
       establishmentId,
       tableId,
       tableName: table.name, // derived server-side, never trusted from the client
@@ -448,7 +437,8 @@ class Store {
     try {
       await setDoc(doc(db, 'orders', newOrder.id), forFirestore(newOrder));
     } catch (err) {
-      console.error('[Firestore] Order save error, persisting in memory:', err);
+      console.error('[Firestore] Order save error:', err);
+      return { ok: false, reason: 'storage_error' };
     }
     this.data.orders.push(newOrder);
     this.notifyClients('ORDER_CREATED', { establishmentId, order: newOrder });
@@ -487,6 +477,9 @@ class Store {
       await setDoc(doc(db, 'orders', updated.id), forFirestore(updated));
     } catch (e) {
       console.error('[Firestore] Order status write error:', e);
+    }
+    if (this.data.orders[orderIndex].updatedAt !== current.updatedAt) {
+      console.warn('[Store] Concurrency warning: order', orderId, 'was modified by a concurrent request while this update was in flight.');
     }
     this.data.orders[orderIndex] = updated;
     this.notifyClients('ORDER_STATUS_CHANGED', { establishmentId: updated.establishmentId, order: updated });
@@ -660,7 +653,7 @@ class Store {
     const table = this.data.tables.find(
       (t) => t.id === input.tableId && t.establishmentId === input.establishmentId
     );
-    if (!table) return null;
+    if (!table || !table.active) return null;
 
     // Check if an active pending call already exists for this table and call type
     const existingIndex = this.tableCalls.findIndex(
@@ -682,7 +675,7 @@ class Store {
       };
 
       try {
-        await setDoc(doc(db, 'tableCalls', updatedCall.id), updatedCall);
+        await setDoc(doc(db, 'tableCalls', updatedCall.id), forFirestore(updatedCall));
       } catch (e) {
         console.error('[Firestore] createTableCall update existing error:', e);
       }
@@ -693,7 +686,7 @@ class Store {
     }
 
     const newCall: TableCall = {
-      id: 'call-' + Math.random().toString(36).substring(2, 9),
+      id: 'call-' + randomUUID(),
       establishmentId: input.establishmentId,
       tableId: input.tableId,
       tableName: table.name,
@@ -750,7 +743,7 @@ class Store {
       }
     }
 
-    this.notifyClients('TABLE_CALL_CREATED', { establishmentId });
+    this.notifyClients('TABLE_CALL_UPDATED', { establishmentId });
     return updatedTarget;
   }
 
@@ -761,7 +754,7 @@ class Store {
   ): Promise<{ ok: boolean; closedAt: string; ordersClosedCount: number }> {
     const closedAt = new Date().toISOString();
     const sessionKey = `${establishmentId}_${tableId}`;
-    this.closedSessions.set(sessionKey, closedAt);
+    this.closedSessions.set(sessionKey, { closedAt, timestamp: Date.now() });
 
     // 1. Mark all active non-finalized orders for this table as 'Entregado' so they are archived as delivered sales
     let ordersClosedCount = 0;
@@ -774,8 +767,8 @@ class Store {
     );
 
     for (const order of activeTableOrders) {
-      await this.updateOrderStatus(order.id, establishmentId, 'Entregado');
-      ordersClosedCount++;
+      const result = await this.updateOrderStatus(order.id, establishmentId, 'Entregado');
+      if (result !== null) ordersClosedCount++;
     }
 
     // 2. Mark pending calls for this table as 'attended'
@@ -796,9 +789,20 @@ class Store {
   }
 
   public getTableSessionStatus(establishmentId: string, tableId: string): { closedAt?: string } {
+    this.purgeOldSessions();
     const sessionKey = `${establishmentId}_${tableId}`;
-    const closedAt = this.closedSessions.get(sessionKey);
-    return { closedAt };
+    const entry = this.closedSessions.get(sessionKey);
+    return { closedAt: entry?.closedAt };
+  }
+
+  private purgeOldSessions(): void {
+    const TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+    const now = Date.now();
+    for (const [key, entry] of this.closedSessions) {
+      if (now - entry.timestamp > TTL_MS) {
+        this.closedSessions.delete(key);
+      }
+    }
   }
 
   // --- Cash close & metrics (ADR-005) ---
@@ -843,7 +847,6 @@ class Store {
       periodStart: this.openPeriodStart(establishmentId, pending),
       periodEnd: new Date().toISOString(),
       totals: computeTotals(pending),
-      orderCount: pending.length,
       topProducts: computeTopProducts(pending),
       byTable: computeByTable(pending),
     };
@@ -857,8 +860,9 @@ class Store {
     // Chain onto any close already running for this tenant so the two cannot select the
     // same orders; the loser sees an empty set and gets 'empty'.
     const previous = this.cashClosesInFlight.get(establishmentId);
-    const run = (previous ?? Promise.resolve<CashCloseResult>({ ok: false })).then(() =>
-      this.runCashClose(establishmentId, actor, note)
+    const run = (previous ?? Promise.resolve<CashCloseResult>({ ok: false })).then(
+      () => this.runCashClose(establishmentId, actor, note),
+      () => this.runCashClose(establishmentId, actor, note)
     );
 
     this.cashClosesInFlight.set(establishmentId, run);
@@ -883,7 +887,7 @@ class Store {
 
     const now = new Date().toISOString();
     const close: CashClose = {
-      id: 'close-' + Math.random().toString(36).substring(2, 9),
+      id: 'close-' + randomUUID(),
       establishmentId,
       closedByEmail: actor.email,
       closedByName: actor.name,
@@ -1005,7 +1009,8 @@ class Store {
       try {
         client.res.write(`data: ${data}\n\n`);
       } catch (err) {
-        // Stale client
+        // Stale client — remove it so it does not accumulate
+        this.removeSseClient(client.res);
       }
     });
   }
