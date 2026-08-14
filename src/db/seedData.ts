@@ -228,6 +228,18 @@ export const initialTables: Table[] = [
  * Helper to construct ISO strings relative to venue local time (America/Argentina/Buenos_Aires).
  * offsetDays: 0 = today, -1 = yesterday, -2 = 2 days ago, etc.
  * hour: 0-23 in venue local time.
+ *
+ * Today's schedule spans a full service day (lunch through 21:30 dinner), so whenever the
+ * seed runs before those hours the naive instant lands in the future. That is not a
+ * cosmetic problem: a register whose openedAt has not happened yet produces a close with
+ * periodStart after periodEnd, and openPeriodStart() then anchors the next period to a
+ * close that has not occurred. Never returning a future instant keeps every fixture in the
+ * past regardless of when the demo boots.
+ *
+ * Clamping is monotonic, so relative order is preserved (createdAt never ends up after
+ * deliveredAt). Events that clamp collapse onto the same instant, which is why the by-hour
+ * chart can show today's later shift bunched at the current hour when the demo runs early.
+ * A pile-up in a demo chart is a fair trade for money records that cannot invert.
  */
 export function getVenueIsoDate(offsetDays: number = 0, hour: number = 12, minute: number = 0): string {
   const now = new Date();
@@ -239,7 +251,7 @@ export function getVenueIsoDate(offsetDays: number = 0, hour: number = 12, minut
   });
   const todayStr = arFormatter.format(now);
   const [y, m, d] = todayStr.split('-').map(Number);
-  
+
   const baseDate = new Date(Date.UTC(y, m - 1, d + offsetDays));
   const year = baseDate.getUTCFullYear();
   const month = baseDate.getUTCMonth() + 1;
@@ -250,7 +262,11 @@ export function getVenueIsoDate(offsetDays: number = 0, hour: number = 12, minut
   const date = new Date(Date.UTC(year, month - 1, day, utcHour % 24, minute, 0));
   // Si utcHour >= 24, agregar un día
   if (utcHour >= 24) date.setUTCDate(date.getUTCDate() + 1);
-  return date.toISOString();
+
+  // A minute of margin keeps a clamped openedAt strictly before the periodEnd that a close
+  // stamps with the wall clock, so the recorded period stays positive rather than zero.
+  const latest = now.getTime() - 60_000;
+  return new Date(Math.min(date.getTime(), latest)).toISOString();
 }
 
 /**
