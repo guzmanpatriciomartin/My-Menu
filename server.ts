@@ -19,6 +19,7 @@ import {
   createOrderSchema,
   orderLookupSchema,
   updateOrderStatusSchema,
+  cancelOrderItemSchema,
   saveMenuItemSchema,
   saveCategorySchema,
   saveTableSchema,
@@ -388,11 +389,25 @@ async function startServer() {
   // Close table session manually (Admin / Waiter)
   app.post('/api/tables/:id/close', requireAuth, async (req, res, next) => {
     try {
-      const result = await store.closeTableSession(req.user!.establishmentId, req.params.id);
+      const result = await store.closeTableSession(
+        req.user!.establishmentId,
+        req.params.id,
+        req.user?.email ? req.user.email.split('@')[0] : 'Staff',
+        req.user?.email
+      );
       if (!result.ok) {
         return res.status(409).json({ error: result.error || 'La mesa no se encuentra abierta o ya fue cerrada previamente.' });
       }
       res.json(result);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // Get historical table close receipts scoped to authenticated tenant
+  app.get('/api/my/table-closes', requireAuth, (req, res, next) => {
+    try {
+      res.json(store.getTableCloses(req.user!.establishmentId));
     } catch (e) {
       next(e);
     }
@@ -540,6 +555,43 @@ async function startServer() {
         return res.status(404).json({ error: 'Order not found' });
       }
       res.json(updated);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // Cancel or reduce quantity of a specific dish/item from an order
+  app.post('/api/orders/:id/cancel-item', requireAuth, async (req, res, next) => {
+    try {
+      const body = parseBody(cancelOrderItemSchema, req, res);
+      if (!body) return;
+
+      // Ownership check: the order must belong to the caller's tenant.
+      const existing = store.getOrder(req.params.id);
+      if (!existing || existing.establishmentId !== req.user!.establishmentId) {
+        return res.status(404).json({ error: 'Order not found' });
+      }
+
+      // An order already counted in a cash close is frozen
+      if (existing.cashCloseId) {
+        return res.status(409).json({
+          error: 'El pedido pertenece a un cierre de caja y no puede modificarse',
+        });
+      }
+
+      const result = await store.cancelOrderItem(
+        req.params.id,
+        req.user!.establishmentId,
+        body.orderItemId,
+        body.quantity,
+        body.cancellationReason
+      );
+
+      if (!result.order) {
+        return res.status(result.status || 400).json({ error: result.error || 'Failed to cancel item' });
+      }
+
+      res.json(result.order);
     } catch (e) {
       next(e);
     }

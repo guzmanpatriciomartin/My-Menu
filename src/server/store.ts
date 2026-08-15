@@ -20,6 +20,7 @@ import {
   generateSeedTableCalls,
   generateSeedCashCloses,
   generateSeedCashRegisters,
+  generateSeedTableCloses,
 } from '../db/seedData';
 import {
   Establishment,
@@ -37,6 +38,7 @@ import {
   MetricsSummary,
   ProductLine,
   TableLine,
+  TableCloseReceipt,
   UserRole,
 } from '../types';
 import {
@@ -159,6 +161,7 @@ function getSeedCollections(): Array<{ name: string; items: Array<{ id: string }
     { name: 'tableCalls', items: generateSeedTableCalls() },
     { name: 'cashCloses', items: generateSeedCashCloses() },
     { name: 'cashRegisters', items: generateSeedCashRegisters() },
+    { name: 'tableCloses', items: generateSeedTableCloses() },
   ];
 }
 
@@ -178,6 +181,7 @@ class Store {
   private tableCalls: TableCall[] = generateSeedTableCalls();
   private cashCloses: CashClose[] = generateSeedCashCloses();
   private cashRegisters: CashRegisterSession[] = generateSeedCashRegisters();
+  private tableCloses: TableCloseReceipt[] = generateSeedTableCloses();
   private closedSessions: Map<string, { closedAt: string; timestamp: number }> = new Map();
 
   // Serializes cash closes per tenant: two waiters hitting "Cerrar caja" at the same
@@ -285,6 +289,16 @@ class Store {
         this.cashRegisters = Array.from(map.values());
       },
       (err) => console.error('[Firestore cashRegisters listener]', err)
+    );
+    onSnapshot(
+      collection(db, 'tableCloses'),
+      (snap) => {
+        const docs = snap.docs.map((d) => d.data() as TableCloseReceipt);
+        const map = new Map<string, TableCloseReceipt>();
+        docs.forEach((d) => map.set(d.id, d));
+        this.tableCloses = Array.from(map.values());
+      },
+      (err) => console.error('[Firestore tableCloses listener]', err)
     );
   }
 
@@ -547,6 +561,72 @@ class Store {
     this.data.orders[orderIndex] = updated;
     this.notifyClients('ORDER_STATUS_CHANGED', { establishmentId: updated.establishmentId, order: updated });
     return updated;
+  }
+
+  // Cancel or reduce quantity of an individual dish from an order
+  public async cancelOrderItem(
+    orderId: string,
+    establishmentId: string,
+    orderItemId: string,
+    quantityToCancel?: number,
+    cancellationReason?: string
+  ): Promise<{ order: Order | null; error?: string; status?: number }> {
+    const orderIndex = this.data.orders.findIndex(
+      (o) => o.id === orderId && o.establishmentId === establishmentId
+    );
+    if (orderIndex === -1) return { order: null, error: 'Order not found', status: 404 };
+
+    const current = this.data.orders[orderIndex];
+
+    if (current.cashCloseId) {
+      return { order: null, error: 'El pedido pertenece a un cierre de caja y no puede modificarse', status: 409 };
+    }
+
+    if (current.status === 'Cancelado') {
+      return { order: null, error: 'El pedido ya se encuentra cancelado', status: 400 };
+    }
+
+    const itemIndex = current.items.findIndex((it) => it.id === orderItemId);
+    if (itemIndex === -1) {
+      return { order: null, error: 'Item not found in order', status: 404 };
+    }
+
+    const targetItem = current.items[itemIndex];
+    const now = new Date().toISOString();
+
+    let updatedItems: OrderItem[];
+    if (quantityToCancel && quantityToCancel > 0 && quantityToCancel < targetItem.quantity) {
+      // Partially reduce quantity
+      updatedItems = current.items.map((it, idx) =>
+        idx === itemIndex
+          ? { ...it, quantity: it.quantity - quantityToCancel }
+          : it
+      );
+    } else {
+      // Remove item completely
+      updatedItems = current.items.filter((_, idx) => idx !== itemIndex);
+    }
+
+    const allCancelled = updatedItems.length === 0;
+    const updated: Order = {
+      ...current,
+      items: updatedItems,
+      status: allCancelled ? 'Cancelado' : current.status,
+      cancellationReason: allCancelled
+        ? (cancellationReason || `Cancelado plato: ${targetItem.name}`)
+        : current.cancellationReason,
+      updatedAt: now,
+    };
+
+    try {
+      await setDoc(doc(db, 'orders', updated.id), forFirestore(updated));
+    } catch (e) {
+      console.error('[Firestore] Cancel order item write error:', e);
+    }
+
+    this.data.orders[orderIndex] = updated;
+    this.notifyClients('ORDER_STATUS_CHANGED', { establishmentId: updated.establishmentId, order: updated });
+    return { order: updated };
   }
 
   // MenuItem CRUD
@@ -819,8 +899,10 @@ class Store {
   // Close Table Session (Admin / Staff Action)
   public async closeTableSession(
     establishmentId: string,
-    tableId: string
-  ): Promise<{ ok: boolean; closedAt?: string; ordersClosedCount?: number; reason?: string; error?: string }> {
+    tableId: string,
+    closedByName?: string,
+    closedByEmail?: string
+  ): Promise<{ ok: boolean; closedAt?: string; ordersClosedCount?: number; tableClose?: TableCloseReceipt; reason?: string; error?: string }> {
     const tableIndex = this.data.tables.findIndex(
       (t) => t.id === tableId && t.establishmentId === establishmentId
     );
@@ -868,12 +950,19 @@ class Store {
 
     // 1. Mark all active non-finalized orders for this table as 'Entregado' so they are archived as delivered sales
     let ordersClosedCount = 0;
+    const finalizedOrders: Order[] = [];
     for (const order of currentSessionOrders) {
       if (order.status !== 'Entregado') {
         const result = await this.updateOrderStatus(order.id, establishmentId, 'Entregado');
-        if (result !== null) ordersClosedCount++;
+        if (result !== null) {
+          ordersClosedCount++;
+          finalizedOrders.push(result);
+        } else {
+          finalizedOrders.push(order);
+        }
       } else {
         ordersClosedCount++;
+        finalizedOrders.push(order);
       }
     }
 
@@ -882,9 +971,51 @@ class Store {
       await this.updateTableCallStatus(call.id, establishmentId, 'attended');
     }
 
+    // 3. Create TableCloseReceipt record if there were orders in this session
+    let tableClose: TableCloseReceipt | undefined;
+    if (finalizedOrders.length > 0) {
+      const totalAmount = finalizedOrders.reduce(
+        (sum, o) => sum + o.items.reduce((s, i) => s + i.price * i.quantity, 0),
+        0
+      );
+      const dinerNames = [
+        ...new Set(finalizedOrders.map((o) => o.dinerName).filter(Boolean) as string[]),
+      ];
+
+      tableClose = {
+        id: `tclose_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        establishmentId,
+        tableId,
+        tableName: table.name,
+        closedAt,
+        closedByName: closedByName || 'Personal de Salón',
+        closedByEmail: closedByEmail || '',
+        openedAt: finalizedOrders[0]?.createdAt || closedAt,
+        orders: finalizedOrders,
+        totalAmount,
+        orderCount: finalizedOrders.length,
+        dinerNames,
+      };
+
+      this.tableCloses.unshift(tableClose);
+
+      try {
+        await setDoc(doc(db, 'tableCloses', tableClose.id), forFirestore(tableClose));
+      } catch (e) {
+        console.error('[Firestore] save tableClose receipt error:', e);
+      }
+    }
+
     this.notifyClients('TABLE_SESSION_CLOSED', { establishmentId, tableId, closedAt });
     this.notifyClients('TABLES_CHANGED', { establishmentId });
-    return { ok: true, closedAt, ordersClosedCount };
+    return { ok: true, closedAt, ordersClosedCount, tableClose };
+  }
+
+  // Get historical table close receipts for a venue (scoped by tenant)
+  public getTableCloses(establishmentId: string): TableCloseReceipt[] {
+    return this.tableCloses
+      .filter((tc) => tc.establishmentId === establishmentId)
+      .sort((a, b) => new Date(b.closedAt).getTime() - new Date(a.closedAt).getTime());
   }
 
   public clearTableSession(establishmentId: string, tableId: string): void {
@@ -974,6 +1105,7 @@ class Store {
       openedByEmail: actor.email,
       openedByName: actor.name,
       initialAmount,
+      openNote: note?.trim() || undefined,
     };
 
     // The register is money state: if the write does not land, memory must not claim the
@@ -1013,6 +1145,7 @@ class Store {
       openedByEmail: register.openedByEmail,
       openedByName: register.openedByName,
       initialAmount: register.initialAmount ?? 0,
+      openNote: register.openNote,
       periodStart: register.openedAt || this.openPeriodStart(establishmentId, pending),
       periodEnd: new Date().toISOString(),
       totals: computeTotals(pending),
@@ -1073,6 +1206,7 @@ class Store {
       topProducts: computeTopProducts(pending),
       byTable: computeByTable(pending),
       initialAmount: register.initialAmount ?? 0,
+      openNote: register.openNote,
       note,
       createdAt: now,
     };

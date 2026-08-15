@@ -1,4 +1,4 @@
-import { Order } from '../types';
+import { Order, TableCloseReceipt } from '../types';
 
 const fmt = (price: number) =>
   new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', minimumFractionDigits: 0 }).format(price);
@@ -86,13 +86,20 @@ export function printKitchenTicket(order: Order) {
   openPrint(html);
 }
 
-export function printTableBill(tableName: string, orders: Order[], estName: string) {
+export function printTableBill(
+  tableName: string,
+  orders: Order[],
+  estName: string,
+  closedAt?: string,
+  closedByName?: string
+) {
   const sessionOrders = orders.filter(o => o.status !== 'Cancelado');
   const grandTotal = sessionOrders.reduce(
     (sum, o) => sum + o.items.reduce((s, i) => s + i.price * i.quantity, 0), 0
   );
 
   const dinerNames = [...new Set(sessionOrders.map(o => o.dinerName).filter(Boolean))];
+  const timestamp = closedAt ? fmtDateTime(closedAt) : fmtDateTime(new Date().toISOString());
 
   const ordersHtml = sessionOrders.map(o => {
     const orderTotal = o.items.reduce((s, i) => s + i.price * i.quantity, 0);
@@ -119,7 +126,8 @@ export function printTableBill(tableName: string, orders: Order[], estName: stri
     <div class="divider-solid"></div>
     <div class="row"><span class="bold">Mesa:</span><span>${tableName}</span></div>
     ${dinerNames.length > 0 ? `<div class="row"><span class="bold">Cliente:</span><span>${dinerNames.join(', ')}</span></div>` : ''}
-    <div class="tag">${fmtDateTime(new Date().toISOString())}</div>
+    ${closedByName ? `<div class="row tag"><span class="bold">Atendido por:</span><span>${closedByName}</span></div>` : ''}
+    <div class="tag">${timestamp}</div>
     <div class="divider-solid"></div>
     ${ordersHtml}
     <div class="total-block">
@@ -133,4 +141,87 @@ export function printTableBill(tableName: string, orders: Order[], estName: stri
     </div>
   `;
   openPrint(html);
+}
+
+export function printTableCloseReceipt(receipt: TableCloseReceipt, estName: string) {
+  printTableBill(
+    receipt.tableName,
+    receipt.orders,
+    estName,
+    receipt.closedAt,
+    receipt.closedByName
+  );
+}
+
+export function downloadTableBillTxt(
+  tableName: string,
+  orders: Order[],
+  estName: string,
+  closedAt?: string,
+  closedByName?: string
+) {
+  const sessionOrders = orders.filter(o => o.status !== 'Cancelado');
+  const grandTotal = sessionOrders.reduce(
+    (sum, o) => sum + o.items.reduce((s, i) => s + i.price * i.quantity, 0), 0
+  );
+  const dinerNames = [...new Set(sessionOrders.map(o => o.dinerName).filter(Boolean))];
+  const dateStr = closedAt ? fmtDateTime(closedAt) : fmtDateTime(new Date().toISOString());
+
+  const lines: string[] = [
+    '========================================',
+    `           ${(estName || 'MI MENÚ').toUpperCase()}`,
+    '========================================',
+    `Mesa:           ${tableName}`,
+    ...(dinerNames.length > 0 ? [`Comensal(es):   ${dinerNames.join(', ')}`] : []),
+    ...(closedByName ? [`Atendido por:   ${closedByName}`] : []),
+    `Fecha y hora:   ${dateStr}`,
+    '----------------------------------------',
+  ];
+
+  sessionOrders.forEach(o => {
+    lines.push(`Comanda #${shortId(o.id)} (${fmtTime(o.createdAt)})`);
+    o.items.forEach(item => {
+      const priceStr = fmt(item.price * item.quantity);
+      const nameQty = `  ${item.quantity}x ${item.name}`;
+      const padding = Math.max(1, 40 - nameQty.length - priceStr.length);
+      lines.push(`${nameQty}${' '.repeat(padding)}${priceStr}`);
+      if (item.comment) {
+        lines.push(`     -> ${item.comment}`);
+      }
+    });
+    const subtotal = o.items.reduce((s, i) => s + i.price * i.quantity, 0);
+    const subStr = `Subtotal: ${fmt(subtotal)}`;
+    lines.push(`${' '.repeat(Math.max(0, 40 - subStr.length))}${subStr}`);
+    lines.push('----------------------------------------');
+  });
+
+  const totalStr = `TOTAL: ${fmt(grandTotal)}`;
+  lines.push('========================================');
+  lines.push(`${' '.repeat(Math.max(0, 40 - totalStr.length))}${totalStr}`);
+  lines.push('========================================');
+  lines.push('       ¡Muchas gracias por su visita!   ');
+  lines.push('               Vuelva pronto            ');
+  lines.push('');
+
+  const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const sanitizedTable = tableName.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+  const dateFile = new Date(closedAt || Date.now()).toISOString().slice(0, 10);
+  a.href = url;
+  a.download = `ticket-${sanitizedTable}-${dateFile}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+export function downloadTableCloseReceiptTxt(receipt: TableCloseReceipt, estName: string) {
+  downloadTableBillTxt(
+    receipt.tableName,
+    receipt.orders,
+    estName,
+    receipt.closedAt,
+    receipt.closedByName
+  );
 }

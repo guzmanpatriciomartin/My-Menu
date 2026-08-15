@@ -110,6 +110,7 @@ export interface CashRegisterSession {
   openedByEmail?: string;
   openedByName?: string;
   initialAmount?: number;
+  openNote?: string;
   closedAt?: string;
 }
 
@@ -119,6 +120,7 @@ export interface CashClosePreview {
   openedByEmail?: string;
   openedByName?: string;
   initialAmount?: number;
+  openNote?: string;
   periodStart: string;
   periodEnd: string;
   totals: CashCloseTotals;
@@ -139,6 +141,7 @@ export interface CashClose {
   topProducts: ProductLine[];
   byTable: TableLine[];
   initialAmount?: number;
+  openNote?: string;
   note?: string;
   createdAt: string;
 }
@@ -172,4 +175,19 @@ export interface UserSession {
   name?: string;
   role: UserRole;
   establishmentId: string; // Managed venue
+}
+
+export interface TableCloseReceipt {
+  id: string;
+  establishmentId: string;
+  tableId: string;
+  tableName: string;
+  closedAt: string;
+  closedByName?: string;
+  closedByEmail?: string;
+  openedAt?: string;
+  orders: Order[];
+  totalAmount: number;
+  orderCount: number;
+  dinerNames: string[];
 }

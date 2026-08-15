@@ -1,17 +1,29 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Search,
-  ChevronRight,
-  ChevronLeft,
-  ChevronDown,
-  ArrowUpDown,
+  Filter,
   Download,
-  Lock,
+  Eye,
+  Printer,
+  Clock,
+  CheckCircle,
+  AlertTriangle,
+  XCircle,
+  ShoppingBag,
+  DollarSign,
   X,
-  Database,
+  ChevronLeft,
+  ChevronRight,
+  Calendar,
+  RotateCcw,
+  Receipt,
+  Tag,
+  User,
+  MapPin
 } from 'lucide-react';
 import { Order, OrderStatus, Table, UserRole } from '../types';
 import { useTheme } from '../theme/ThemeContext';
+import { printKitchenTicket } from '../lib/thermalPrint';
 
 interface OrdersTableProps {
   orders: Order[];
@@ -20,559 +32,830 @@ interface OrdersTableProps {
   formatPrice: (price: number) => string;
 }
 
-type SortKey = 'createdAt' | 'duration' | 'total' | 'table' | 'status' | 'items';
-type SortDir = 'asc' | 'desc';
-type PeriodFilter = 'today' | '7d' | '30d' | 'all';
-
-const PAGE_SIZE = 25;
-
-const ALL_STATUSES: OrderStatus[] = ['Recibido', 'En preparación', 'Listo', 'Entregado', 'Cancelado'];
-
-// Chronological weight so sorting by status follows the kitchen lifecycle
-// instead of the alphabet.
-const STATUS_WEIGHT: Record<OrderStatus, number> = {
-  'Recibido': 0,
-  'En preparación': 1,
-  'Listo': 2,
-  'Entregado': 3,
-  'Cancelado': 4,
-};
-
-const STATUS_STYLE: Record<OrderStatus, string> = {
-  'Recibido': 'bg-amber-500/10 text-amber-500 border-amber-500/20',
-  'En preparación': 'bg-indigo-500/10 text-indigo-400 border-indigo-500/20',
-  'Listo': 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
-  'Entregado': 'bg-zinc-500/10 text-zinc-400 border-zinc-500/20',
-  'Cancelado': 'bg-rose-500/10 text-rose-400 border-rose-500/20',
-};
-
-const isTerminal = (s: OrderStatus) => s === 'Entregado' || s === 'Cancelado';
-
-const formatDuration = (ms: number) => {
-  if (!isFinite(ms) || ms < 0) return '—';
-  const totalSec = Math.floor(ms / 1000);
-  const h = Math.floor(totalSec / 3600);
-  const m = Math.floor((totalSec % 3600) / 60);
-  const s = totalSec % 60;
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
-};
-
-const formatClock = (iso: string) =>
-  new Date(iso).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', hour12: false });
-
-const formatDay = (iso: string) =>
-  new Date(iso).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: '2-digit' });
-
-const shortId = (id: string) => id.slice(-6).toUpperCase();
-
-// An order enriched with the derived fields the table sorts and filters on.
-interface OrderRow {
-  order: Order;
-  total: number;
-  unitCount: number;
-  durationMs: number;
-  isLive: boolean;
-  searchBlob: string;
-}
-
-export default function OrdersTable({ orders, tables, role, formatPrice }: OrdersTableProps) {
+export default function OrdersTable({
+  orders,
+  tables,
+  role: _role,
+  formatPrice
+}: OrdersTableProps) {
   const { classes } = useTheme();
 
-  const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | OrderStatus>('all');
-  const [tableFilter, setTableFilter] = useState('all');
-  const [periodFilter, setPeriodFilter] = useState<PeriodFilter>('today');
-  const [sortKey, setSortKey] = useState<SortKey>('createdAt');
-  const [sortDir, setSortDir] = useState<SortDir>('desc');
-  const [page, setPage] = useState(0);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // Filter & Search states
+  const [searchQuery, setSearchQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [tableFilter, setTableFilter] = useState<string>('all');
+  const [paymentFilter, setPaymentFilter] = useState<string>('all');
+  const [dateFilter, setDateFilter] = useState<string>('all');
+  const [sortBy, setSortBy] = useState<'date_desc' | 'date_asc' | 'total_desc' | 'total_asc'>('date_desc');
 
-  // Orders still in the kitchen have a duration that grows in real time. The
-  // parent polls every 3s, but this keeps the clock honest if polling stalls.
-  const [nowTick, setNowTick] = useState(() => Date.now());
-  useEffect(() => {
-    const t = setInterval(() => setNowTick(Date.now()), 15000);
-    return () => clearInterval(t);
-  }, []);
+  // Pagination states
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(15);
 
-  // Any filter change invalidates the current page offset.
-  useEffect(() => {
-    setPage(0);
-  }, [search, statusFilter, tableFilter, periodFilter]);
+  // Detail Modal state
+  const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
 
-  const rows: OrderRow[] = useMemo(() => {
-    return orders.map((order) => {
-      const total = order.items.reduce((acc, i) => acc + i.price * i.quantity, 0);
-      const unitCount = order.items.reduce((acc, i) => acc + i.quantity, 0);
+  // Helper: calculate total for an order
+  const getOrderTotal = (order: Order): number => {
+    return order.items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
+  };
 
-      // Closed orders measure created→delivered; open ones measure created→now.
-      const startMs = new Date(order.createdAt).getTime();
-      const endMs = isTerminal(order.status)
-        ? new Date(order.deliveredAt || order.updatedAt).getTime()
-        : nowTick;
+  // Helper: total item count for an order
+  const getOrderItemCount = (order: Order): number => {
+    return order.items.reduce((sum, item) => sum + item.quantity, 0);
+  };
 
-      const searchBlob = [
-        shortId(order.id),
-        order.tableName,
-        order.dinerName || '',
-        order.status,
-        ...order.items.map((i) => `${i.name} ${i.comment || ''}`),
-      ]
-        .join(' ')
-        .toLowerCase();
-
-      return {
-        order,
-        total,
-        unitCount,
-        durationMs: endMs - startMs,
-        isLive: !isTerminal(order.status),
-        searchBlob,
-      };
-    });
-  }, [orders, nowTick]);
-
-  const filtered = useMemo(() => {
-    const term = search.trim().toLowerCase();
-
-    // Period cutoffs are computed from local midnight, matching how a shift is
-    // read on the floor.
-    let cutoffMs = 0;
-    if (periodFilter !== 'all') {
-      const midnight = new Date();
-      midnight.setHours(0, 0, 0, 0);
-      const days = periodFilter === 'today' ? 0 : periodFilter === '7d' ? 6 : 29;
-      cutoffMs = midnight.getTime() - days * 86400000;
+  // Status Badge Helper
+  const getStatusBadge = (status: OrderStatus) => {
+    switch (status) {
+      case 'Recibido':
+        return (
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-500/10 text-blue-400 border border-blue-500/20">
+            <Clock className="w-3 h-3" />
+            Recibido
+          </span>
+        );
+      case 'En preparación':
+        return (
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/20">
+            <ShoppingBag className="w-3 h-3 animate-pulse" />
+            En preparación
+          </span>
+        );
+      case 'Listo':
+        return (
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+            <CheckCircle className="w-3 h-3" />
+            Listo
+          </span>
+        );
+      case 'Entregado':
+        return (
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-zinc-500/10 text-zinc-400 border border-zinc-500/20">
+            <CheckCircle className="w-3 h-3" />
+            Entregado
+          </span>
+        );
+      case 'Cancelado':
+        return (
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-rose-500/10 text-rose-400 border border-rose-500/20">
+            <XCircle className="w-3 h-3" />
+            Cancelado
+          </span>
+        );
+      default:
+        return (
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-zinc-500/10 text-zinc-400 border border-zinc-500/20">
+            {status}
+          </span>
+        );
     }
+  };
 
-    return rows.filter((r) => {
-      if (statusFilter !== 'all' && r.order.status !== statusFilter) return false;
-      if (tableFilter !== 'all' && r.order.tableId !== tableFilter) return false;
-      if (cutoffMs > 0 && new Date(r.order.createdAt).getTime() < cutoffMs) return false;
-      if (term && !r.searchBlob.includes(term)) return false;
-      return true;
-    });
-  }, [rows, search, statusFilter, tableFilter, periodFilter]);
+  // Payment Badge Helper
+  const getPaymentBadge = (status: 'pending' | 'paid' | null) => {
+    if (status === 'paid') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+          <DollarSign className="w-3 h-3" />
+          Pagado
+        </span>
+      );
+    }
+    if (status === 'pending') {
+      return (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30">
+          <Clock className="w-3 h-3" />
+          Pendiente
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-bold bg-zinc-500/10 text-zinc-400 border border-zinc-500/20">
+        Sin cobrar
+      </span>
+    );
+  };
 
-  const sorted = useMemo(() => {
-    const dir = sortDir === 'asc' ? 1 : -1;
-    return [...filtered].sort((a, b) => {
-      let cmp = 0;
-      switch (sortKey) {
-        case 'createdAt':
-          cmp = new Date(a.order.createdAt).getTime() - new Date(b.order.createdAt).getTime();
-          break;
-        case 'duration':
-          cmp = a.durationMs - b.durationMs;
-          break;
-        case 'total':
-          cmp = a.total - b.total;
-          break;
-        case 'items':
-          cmp = a.unitCount - b.unitCount;
-          break;
-        case 'table':
-          cmp = a.order.tableName.localeCompare(b.order.tableName, 'es');
-          break;
-        case 'status':
-          cmp = STATUS_WEIGHT[a.order.status] - STATUS_WEIGHT[b.order.status];
-          break;
-      }
-      // Stable tiebreaker so equal keys keep a predictable order across renders.
-      if (cmp === 0) cmp = a.order.id.localeCompare(b.order.id);
-      return cmp * dir;
-    });
-  }, [filtered, sortKey, sortDir]);
+  // Filtered and sorted orders
+  const filteredOrders = useMemo(() => {
+    const now = new Date();
+    const todayStr = now.toISOString().slice(0, 10);
+    const yesterdayDate = new Date(now);
+    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+    const yesterdayStr = yesterdayDate.toISOString().slice(0, 10);
+    const weekAgo = new Date(now);
+    weekAgo.setDate(weekAgo.getDate() - 7);
 
-  const pageCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
-  const safePage = Math.min(page, pageCount - 1);
-  const pageRows = sorted.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
+    return orders
+      .filter((order) => {
+        // Search query filter
+        if (searchQuery.trim()) {
+          const q = searchQuery.toLowerCase().trim();
+          const matchId = order.id.toLowerCase().includes(q);
+          const matchTable = (order.tableName || '').toLowerCase().includes(q);
+          const matchDiner = (order.dinerName || '').toLowerCase().includes(q);
+          const matchItems = order.items.some((it) => it.name.toLowerCase().includes(q) || (it.comment || '').toLowerCase().includes(q));
+          if (!matchId && !matchTable && !matchDiner && !matchItems) {
+            return false;
+          }
+        }
 
-  // Aggregates mirror the metrics panel, which is admin-only: they expose
-  // business performance rather than the floor state a waiter needs.
-  const aggregates = useMemo(() => {
-    const billable = sorted.filter((r) => r.order.status !== 'Cancelado');
-    const revenue = billable.reduce((acc, r) => acc + r.total, 0);
-    const closed = sorted.filter((r) => isTerminal(r.order.status));
-    const avgDuration = closed.length
-      ? closed.reduce((acc, r) => acc + r.durationMs, 0) / closed.length
-      : 0;
+        // Status filter
+        if (statusFilter !== 'all' && order.status !== statusFilter) {
+          return false;
+        }
+
+        // Table filter
+        if (tableFilter !== 'all' && order.tableId !== tableFilter && order.tableName !== tableFilter) {
+          return false;
+        }
+
+        // Payment filter
+        if (paymentFilter === 'paid' && order.paymentStatus !== 'paid') {
+          return false;
+        }
+        if (paymentFilter === 'pending' && order.paymentStatus !== 'pending') {
+          return false;
+        }
+        if (paymentFilter === 'unpaid' && (order.paymentStatus === 'paid')) {
+          return false;
+        }
+
+        // Date filter
+        if (dateFilter === 'today') {
+          const orderDate = order.createdAt.slice(0, 10);
+          if (orderDate !== todayStr) return false;
+        } else if (dateFilter === 'yesterday') {
+          const orderDate = order.createdAt.slice(0, 10);
+          if (orderDate !== yesterdayStr) return false;
+        } else if (dateFilter === 'week') {
+          const orderDate = new Date(order.createdAt);
+          if (orderDate < weekAgo) return false;
+        }
+
+        return true;
+      })
+      .sort((a, b) => {
+        if (sortBy === 'date_desc') {
+          return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+        }
+        if (sortBy === 'date_asc') {
+          return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+        }
+        if (sortBy === 'total_desc') {
+          return getOrderTotal(b) - getOrderTotal(a);
+        }
+        if (sortBy === 'total_asc') {
+          return getOrderTotal(a) - getOrderTotal(b);
+        }
+        return 0;
+      });
+  }, [orders, searchQuery, statusFilter, tableFilter, paymentFilter, dateFilter, sortBy]);
+
+  // Aggregate Metrics over the filtered list
+  const metrics = useMemo(() => {
+    const totalCount = filteredOrders.length;
+    const nonCancelled = filteredOrders.filter((o) => o.status !== 'Cancelado');
+    const totalRevenue = nonCancelled.reduce((sum, o) => sum + getOrderTotal(o), 0);
+    const avgTicket = nonCancelled.length > 0 ? Math.round(totalRevenue / nonCancelled.length) : 0;
+    const deliveredCount = filteredOrders.filter((o) => o.status === 'Entregado').length;
+    const cancelledCount = filteredOrders.filter((o) => o.status === 'Cancelado').length;
+    const paidCount = filteredOrders.filter((o) => o.paymentStatus === 'paid').length;
+
     return {
-      revenue,
-      orderCount: sorted.length,
-      averageTicket: billable.length ? revenue / billable.length : 0,
-      avgDuration,
+      totalCount,
+      totalRevenue,
+      avgTicket,
+      deliveredCount,
+      cancelledCount,
+      paidCount
     };
-  }, [sorted]);
+  }, [filteredOrders]);
 
-  const toggleSort = (key: SortKey) => {
-    if (sortKey === key) {
-      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
-    } else {
-      setSortKey(key);
-      setSortDir(key === 'table' || key === 'status' ? 'asc' : 'desc');
-    }
-  };
+  // Paginated subset
+  const totalPages = Math.max(1, Math.ceil(filteredOrders.length / pageSize));
+  const paginatedOrders = useMemo(() => {
+    const startIndex = (currentPage - 1) * pageSize;
+    return filteredOrders.slice(startIndex, startIndex + pageSize);
+  }, [filteredOrders, currentPage, pageSize]);
 
-  const toggleExpanded = (id: string) => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  const clearFilters = () => {
-    setSearch('');
+  // Reset pagination when filter changes
+  const handleFilterReset = () => {
+    setSearchQuery('');
     setStatusFilter('all');
     setTableFilter('all');
-    setPeriodFilter('today');
+    setPaymentFilter('all');
+    setDateFilter('all');
+    setSortBy('date_desc');
+    setCurrentPage(1);
   };
 
-  const hasActiveFilters =
-    search.trim() !== '' || statusFilter !== 'all' || tableFilter !== 'all' || periodFilter !== 'today';
+  // Export to CSV
+  const handleExportCSV = () => {
+    if (filteredOrders.length === 0) return;
 
-  // Exports the filtered set, not just the visible page — the point is to take
-  // the current query into a spreadsheet.
-  const exportCsv = () => {
-    const esc = (v: string | number) => `"${String(v).replace(/"/g, '""')}"`;
-    const header = [
-      'ID', 'Fecha', 'Hora', 'Mesa', 'Comensal', 'Estado',
-      'Items', 'Unidades', 'Total', 'Duracion', 'Pago', 'Cierre de caja', 'Motivo cancelacion',
-    ];
-    const lines = sorted.map((r) =>
-      [
-        shortId(r.order.id),
-        formatDay(r.order.createdAt),
-        formatClock(r.order.createdAt),
-        r.order.tableName,
-        r.order.dinerName || '',
-        r.order.status,
-        r.order.items.map((i) => `${i.quantity}x ${i.name}`).join(' | '),
-        r.unitCount,
-        r.total,
-        formatDuration(r.durationMs),
-        r.order.paymentStatus === 'paid' ? 'Pagado' : r.order.paymentStatus === 'pending' ? 'Pendiente' : '',
-        r.order.cashCloseId ? 'Si' : 'No',
-        r.order.cancellationReason || '',
-      ].map(esc).join(',')
-    );
+    const headers = ['ID', 'Fecha', 'Hora', 'Mesa', 'Comensal', 'Estado', 'Pago', 'Items', 'Total'];
+    const rows = filteredOrders.map((o) => {
+      const d = new Date(o.createdAt);
+      const dateStr = d.toLocaleDateString('es-AR');
+      const timeStr = d.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
+      const itemsStr = o.items.map((it) => `${it.quantity}x ${it.name}`).join('; ');
+      const total = getOrderTotal(o);
 
-    // BOM keeps accents readable when Excel opens the file.
-    const blob = new Blob(['﻿' + [header.map(esc).join(','), ...lines].join('\r\n')], {
-      type: 'text/csv;charset=utf-8;',
+      return [
+        o.id,
+        dateStr,
+        timeStr,
+        `"${o.tableName || ''}"`,
+        `"${o.dinerName || ''}"`,
+        o.status,
+        o.paymentStatus || 'Sin cobrar',
+        `"${itemsStr}"`,
+        total
+      ];
     });
+
+    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `pedidos_${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `pedidos_${new Date().toISOString().slice(0, 10)}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
     URL.revokeObjectURL(url);
   };
 
-  const SortHeader = ({ label, sortKey: key, align }: { label: string; sortKey: SortKey; align?: 'right' }) => (
-    <th className={`p-3 ${align === 'right' ? 'text-right' : ''}`}>
-      <button
-        onClick={() => toggleSort(key)}
-        className={`inline-flex items-center gap-1 hover:text-amber-500 transition ${
-          sortKey === key ? 'text-amber-500' : ''
-        }`}
-        title={`Ordenar por ${label}`}
-      >
-        <span>{label}</span>
-        {sortKey === key ? (
-          <ChevronDown className={`w-3 h-3 transition-transform ${sortDir === 'asc' ? 'rotate-180' : ''}`} />
-        ) : (
-          <ArrowUpDown className="w-2.5 h-2.5 opacity-40" />
-        )}
-      </button>
-    </th>
-  );
-
-  const selectClass = `${classes.inputBg} border ${classes.inputBorder} ${classes.textPrimary} ${classes.radiusBtn} px-3 py-2 text-[11px] font-mono outline-none focus:border-amber-500 transition`;
-
   return (
     <div className="space-y-4">
-      {/* Toolbar: search + filters */}
-      <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-4 space-y-3`}>
-        <div className="flex flex-wrap items-center gap-2.5">
-          <div className="relative flex-1 min-w-[220px]">
-            <Search className={`w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 ${classes.textMuted}`} />
-            <input
-              id="orders-table-search"
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Buscar por ID, mesa, comensal, plato o comentario..."
-              className={`w-full ${classes.inputBg} border ${classes.inputBorder} ${classes.textPrimary} ${classes.radiusBtn} pl-9 pr-3 py-2 text-xs outline-none focus:border-amber-500 transition`}
-            />
-          </div>
-
-          <select
-            id="orders-table-status-filter"
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value as 'all' | OrderStatus)}
-            className={selectClass}
-          >
-            <option value="all">Todos los estados</option>
-            {ALL_STATUSES.map((s) => (
-              <option key={s} value={s}>{s}</option>
-            ))}
-          </select>
-
-          <select
-            id="orders-table-table-filter"
-            value={tableFilter}
-            onChange={(e) => setTableFilter(e.target.value)}
-            className={selectClass}
-          >
-            <option value="all">Todas las mesas</option>
-            {tables.map((t) => (
-              <option key={t.id} value={t.id}>{t.name}</option>
-            ))}
-          </select>
-
-          <select
-            id="orders-table-period-filter"
-            value={periodFilter}
-            onChange={(e) => setPeriodFilter(e.target.value as PeriodFilter)}
-            className={selectClass}
-          >
-            <option value="today">Hoy</option>
-            <option value="7d">Últimos 7 días</option>
-            <option value="30d">Últimos 30 días</option>
-            <option value="all">Historial completo</option>
-          </select>
-
-          {hasActiveFilters && (
-            <button
-              id="orders-table-clear-filters"
-              onClick={clearFilters}
-              className={`px-3 py-2 ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} ${classes.textMuted} hover:text-rose-400 hover:border-rose-500/40 text-[10px] font-black uppercase tracking-widest transition flex items-center gap-1.5`}
-              title="Limpiar filtros"
-            >
-              <X className="w-3 h-3" />
-              Limpiar
-            </button>
-          )}
-
-          {/* Exporting the dataset is analytics territory: admin only. */}
-          {role === 'admin' && (
-            <button
-              id="orders-table-export"
-              onClick={exportCsv}
-              disabled={sorted.length === 0}
-              className={`px-3 py-2 ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} ${classes.textSecondary} hover:border-amber-500 hover:text-amber-500 text-[10px] font-black uppercase tracking-widest transition flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed`}
-              title="Exportar el resultado filtrado a CSV"
-            >
-              <Download className="w-3 h-3" />
-              CSV
-            </button>
-          )}
+      {/* Metrics Summary Strip */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-3.5 space-y-1`}>
+          <span className={`text-[10px] font-black uppercase tracking-wider ${classes.textMuted} flex items-center gap-1.5`}>
+            <ShoppingBag className="w-3.5 h-3.5 text-amber-500" />
+            Pedidos
+          </span>
+          <p className={`text-lg font-black font-mono ${classes.textPrimary}`}>
+            {metrics.totalCount}
+          </p>
         </div>
 
-        <div className={`flex items-center gap-2 text-[10px] font-mono ${classes.textMuted}`}>
-          <Database className="w-3 h-3" />
-          <span>
-            {sorted.length} pedido(s) coinciden · mostrando {pageRows.length} de {sorted.length}
+        <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-3.5 space-y-1`}>
+          <span className={`text-[10px] font-black uppercase tracking-wider ${classes.textMuted} flex items-center gap-1.5`}>
+            <DollarSign className="w-3.5 h-3.5 text-emerald-500" />
+            Facturación
           </span>
+          <p className="text-lg font-black font-mono text-emerald-400">
+            {formatPrice(metrics.totalRevenue)}
+          </p>
+        </div>
+
+        <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-3.5 space-y-1`}>
+          <span className={`text-[10px] font-black uppercase tracking-wider ${classes.textMuted} flex items-center gap-1.5`}>
+            <Receipt className="w-3.5 h-3.5 text-blue-500" />
+            Ticket Promedio
+          </span>
+          <p className={`text-lg font-black font-mono ${classes.textPrimary}`}>
+            {formatPrice(metrics.avgTicket)}
+          </p>
+        </div>
+
+        <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-3.5 space-y-1`}>
+          <span className={`text-[10px] font-black uppercase tracking-wider ${classes.textMuted} flex items-center gap-1.5`}>
+            <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
+            Entregados
+          </span>
+          <p className="text-lg font-black font-mono text-emerald-400">
+            {metrics.deliveredCount}
+          </p>
+        </div>
+
+        <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-3.5 space-y-1`}>
+          <span className={`text-[10px] font-black uppercase tracking-wider ${classes.textMuted} flex items-center gap-1.5`}>
+            <DollarSign className="w-3.5 h-3.5 text-emerald-500" />
+            Cobrados
+          </span>
+          <p className={`text-lg font-black font-mono ${classes.textPrimary}`}>
+            {metrics.paidCount}
+          </p>
+        </div>
+
+        <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-3.5 space-y-1`}>
+          <span className={`text-[10px] font-black uppercase tracking-wider ${classes.textMuted} flex items-center gap-1.5`}>
+            <XCircle className="w-3.5 h-3.5 text-rose-500" />
+            Cancelados
+          </span>
+          <p className="text-lg font-black font-mono text-rose-400">
+            {metrics.cancelledCount}
+          </p>
         </div>
       </div>
 
-      {/* Aggregate strip — admin only, consistent with the metrics panel. */}
-      {role === 'admin' ? (
-        <div className={`grid grid-cols-2 lg:grid-cols-4 gap-3`}>
-          {[
-            { label: 'Pedidos', value: String(aggregates.orderCount) },
-            { label: 'Facturado', value: formatPrice(aggregates.revenue) },
-            { label: 'Ticket promedio', value: formatPrice(aggregates.averageTicket) },
-            { label: 'Duración promedio', value: formatDuration(aggregates.avgDuration) },
-          ].map((kpi) => (
-            <div key={kpi.label} className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-3.5`}>
-              <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>
-                {kpi.label}
-              </span>
-              <span className={`text-lg font-black ${classes.textPrimary} font-mono mt-0.5 block`}>{kpi.value}</span>
+      {/* Control Bar: Search & Filters */}
+      <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-4 space-y-3`}>
+        <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">
+          {/* Search Input */}
+          <div className="relative flex-1">
+            <Search className={`w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 ${classes.textMuted}`} />
+            <input
+              id="orders-table-search-input"
+              type="text"
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                setCurrentPage(1);
+              }}
+              placeholder="Buscar por ID, mesa, comensal o plato..."
+              className={`w-full pl-10 pr-4 py-2 text-xs ${classes.inputBg} border ${classes.borderCard} ${classes.radiusBtn} ${classes.textPrimary} placeholder:${classes.textMuted} focus:outline-none focus:border-amber-500 transition`}
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-zinc-200"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          {/* Quick Actions: Export CSV & Reset */}
+          <div className="flex items-center gap-2">
+            <button
+              id="orders-table-export-csv-btn"
+              onClick={handleExportCSV}
+              disabled={filteredOrders.length === 0}
+              className={`px-3 py-2 ${classes.radiusBtn} text-xs font-black uppercase tracking-wider ${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 ${classes.textPrimary} transition flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed`}
+              title="Descargar pedidos filtrados como archivo CSV"
+            >
+              <Download className="w-3.5 h-3.5 text-amber-500" />
+              <span>Exportar CSV</span>
+            </button>
+
+            <button
+              id="orders-table-reset-filters-btn"
+              onClick={handleFilterReset}
+              className={`p-2 ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 ${classes.textMuted} hover:${classes.textPrimary} transition`}
+              title="Restablecer filtros"
+            >
+              <RotateCcw className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+
+        {/* Filter Dropdowns Grid */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-2.5 pt-2 border-t border-zinc-800/40">
+          {/* Status Filter */}
+          <div className="space-y-1">
+            <label className={`text-[10px] font-black uppercase tracking-wider ${classes.textMuted} block`}>
+              Estado
+            </label>
+            <select
+              id="orders-table-status-filter"
+              value={statusFilter}
+              onChange={(e) => {
+                setStatusFilter(e.target.value);
+                setCurrentPage(1);
+              }}
+              className={`w-full px-2.5 py-1.5 text-xs ${classes.inputBg} border ${classes.borderCard} ${classes.radiusBtn} ${classes.textPrimary} focus:outline-none focus:border-amber-500`}
+            >
+              <option value="all">Todos los estados</option>
+              <option value="Recibido">Recibido</option>
+              <option value="En preparación">En preparación</option>
+              <option value="Listo">Listo</option>
+              <option value="Entregado">Entregado</option>
+              <option value="Cancelado">Cancelado</option>
+            </select>
+          </div>
+
+          {/* Table Filter */}
+          <div className="space-y-1">
+            <label className={`text-[10px] font-black uppercase tracking-wider ${classes.textMuted} block`}>
+              Mesa
+            </label>
+            <select
+              id="orders-table-table-filter"
+              value={tableFilter}
+              onChange={(e) => {
+                setTableFilter(e.target.value);
+                setCurrentPage(1);
+              }}
+              className={`w-full px-2.5 py-1.5 text-xs ${classes.inputBg} border ${classes.borderCard} ${classes.radiusBtn} ${classes.textPrimary} focus:outline-none focus:border-amber-500`}
+            >
+              <option value="all">Todas las mesas</option>
+              {tables.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* Payment Filter */}
+          <div className="space-y-1">
+            <label className={`text-[10px] font-black uppercase tracking-wider ${classes.textMuted} block`}>
+              Pago
+            </label>
+            <select
+              id="orders-table-payment-filter"
+              value={paymentFilter}
+              onChange={(e) => {
+                setPaymentFilter(e.target.value);
+                setCurrentPage(1);
+              }}
+              className={`w-full px-2.5 py-1.5 text-xs ${classes.inputBg} border ${classes.borderCard} ${classes.radiusBtn} ${classes.textPrimary} focus:outline-none focus:border-amber-500`}
+            >
+              <option value="all">Todos</option>
+              <option value="paid">Pagados</option>
+              <option value="pending">Pendientes</option>
+              <option value="unpaid">Sin cobrar</option>
+            </select>
+          </div>
+
+          {/* Date Filter */}
+          <div className="space-y-1">
+            <label className={`text-[10px] font-black uppercase tracking-wider ${classes.textMuted} block`}>
+              Fecha
+            </label>
+            <select
+              id="orders-table-date-filter"
+              value={dateFilter}
+              onChange={(e) => {
+                setDateFilter(e.target.value);
+                setCurrentPage(1);
+              }}
+              className={`w-full px-2.5 py-1.5 text-xs ${classes.inputBg} border ${classes.borderCard} ${classes.radiusBtn} ${classes.textPrimary} focus:outline-none focus:border-amber-500`}
+            >
+              <option value="all">Todo el historial</option>
+              <option value="today">Hoy</option>
+              <option value="yesterday">Ayer</option>
+              <option value="week">Últimos 7 días</option>
+            </select>
+          </div>
+
+          {/* Sort By */}
+          <div className="space-y-1 col-span-2 sm:col-span-1">
+            <label className={`text-[10px] font-black uppercase tracking-wider ${classes.textMuted} block`}>
+              Ordenar por
+            </label>
+            <select
+              id="orders-table-sort-filter"
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as any)}
+              className={`w-full px-2.5 py-1.5 text-xs ${classes.inputBg} border ${classes.borderCard} ${classes.radiusBtn} ${classes.textPrimary} focus:outline-none focus:border-amber-500`}
+            >
+              <option value="date_desc">Más recientes primero</option>
+              <option value="date_asc">Más antiguos primero</option>
+              <option value="total_desc">Mayor importe</option>
+              <option value="total_asc">Menor importe</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {/* Orders Table Container */}
+      <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} overflow-hidden shadow-sm`}>
+        {paginatedOrders.length === 0 ? (
+          <div className="py-16 text-center space-y-3">
+            <div className="w-12 h-12 rounded-full bg-zinc-800/60 border border-zinc-700/50 flex items-center justify-center mx-auto text-zinc-400">
+              <ShoppingBag className="w-6 h-6" />
             </div>
-          ))}
-        </div>
-      ) : (
-        <div className={`${classes.inputBg} border ${classes.borderCard} ${classes.radiusCard} px-4 py-2.5 flex items-center gap-2`}>
-          <Lock className={`w-3 h-3 ${classes.textMuted} shrink-0`} />
-          <span className={`text-[10px] ${classes.textMuted} font-medium`}>
-            Los totales agregados y la exportación están reservados al rol administrador.
-          </span>
-        </div>
-      )}
-
-      {/* Data table */}
-      <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} overflow-hidden`}>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className={`border-b ${classes.borderCard} ${classes.bgHeader} ${classes.textMuted} font-mono text-[9px] uppercase tracking-widest font-bold`}>
-                <th className="p-3 w-8"></th>
-                <th className="p-3">ID</th>
-                <SortHeader label="Mesa" sortKey="table" />
-                <th className="p-3">Comensal</th>
-                <SortHeader label="Items" sortKey="items" />
-                <SortHeader label="Total" sortKey="total" align="right" />
-                <SortHeader label="Estado" sortKey="status" />
-                <SortHeader label="Hora" sortKey="createdAt" />
-                <SortHeader label="Duración" sortKey="duration" />
-                <th className="p-3">Caja</th>
-              </tr>
-            </thead>
-            <tbody className={`divide-y ${classes.borderCard} text-xs`}>
-              {pageRows.length === 0 ? (
-                <tr>
-                  <td colSpan={10} className={`p-12 text-center ${classes.textMuted}`}>
-                    <Database className="w-8 h-8 mx-auto mb-3 opacity-40" />
-                    <p className="text-xs font-bold uppercase tracking-wider">Sin resultados</p>
-                    <p className="text-[11px] mt-1">Ajusta la búsqueda o los filtros para ver pedidos.</p>
-                  </td>
+            <div className="space-y-1">
+              <h3 className={`text-sm font-black ${classes.textPrimary}`}>No se encontraron pedidos</h3>
+              <p className={`text-xs ${classes.textMuted} max-w-sm mx-auto`}>
+                Intenta ajustar los filtros de búsqueda, fecha o estado para visualizar los registros.
+              </p>
+            </div>
+            {(searchQuery || statusFilter !== 'all' || tableFilter !== 'all' || paymentFilter !== 'all' || dateFilter !== 'all') && (
+              <button
+                onClick={handleFilterReset}
+                className="px-3 py-1.5 text-xs font-bold text-amber-500 hover:underline"
+              >
+                Limpiar todos los filtros
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className={`border-b ${classes.borderCard} bg-zinc-950/30 text-[10px] font-black uppercase tracking-wider ${classes.textMuted}`}>
+                  <th className="py-3 px-4">Pedido / ID</th>
+                  <th className="py-3 px-4">Mesa / Comensal</th>
+                  <th className="py-3 px-4">Fecha y Hora</th>
+                  <th className="py-3 px-4">Ítems</th>
+                  <th className="py-3 px-4">Estado</th>
+                  <th className="py-3 px-4">Pago</th>
+                  <th className="py-3 px-4 text-right">Total</th>
+                  <th className="py-3 px-4 text-center">Acciones</th>
                 </tr>
-              ) : (
-                pageRows.map((r) => {
-                  const o = r.order;
-                  const isOpen = expanded.has(o.id);
+              </thead>
+              <tbody className="divide-y divide-zinc-800/40 text-xs">
+                {paginatedOrders.map((order) => {
+                  const total = getOrderTotal(order);
+                  const itemCount = getOrderItemCount(order);
+                  const dateObj = new Date(order.createdAt);
+                  const timeFormatted = dateObj.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
+                  const dateFormatted = dateObj.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' });
+
                   return (
-                    <React.Fragment key={o.id}>
-                      <tr
-                        id={`orders-row-${o.id}`}
-                        onClick={() => toggleExpanded(o.id)}
-                        className={`${classes.bgCardHover} cursor-pointer transition ${isOpen ? classes.inputBg : ''}`}
-                      >
-                        <td className="p-3">
-                          <ChevronRight
-                            className={`w-3.5 h-3.5 ${classes.textMuted} transition-transform ${isOpen ? 'rotate-90' : ''}`}
-                          />
-                        </td>
-                        <td className={`p-3 font-mono text-[10px] ${classes.textMuted}`}>#{shortId(o.id)}</td>
-                        <td className={`p-3 font-bold ${classes.textPrimary}`}>{o.tableName}</td>
-                        <td className={`p-3 ${classes.textSecondary}`}>
-                          {o.dinerName || <span className={classes.textMuted}>—</span>}
-                        </td>
-                        <td className={`p-3 font-mono ${classes.textSecondary}`}>
-                          {r.unitCount} <span className={`${classes.textMuted} text-[10px]`}>u.</span>
-                        </td>
-                        <td className={`p-3 text-right font-mono font-black ${o.status === 'Cancelado' ? `${classes.textMuted} line-through` : 'text-amber-500'}`}>
-                          {formatPrice(r.total)}
-                        </td>
-                        <td className="p-3">
-                          <span className={`text-[9px] font-black font-mono uppercase px-2 py-1 ${classes.radiusPill} border tracking-wider whitespace-nowrap ${STATUS_STYLE[o.status]}`}>
-                            {o.status}
+                    <tr
+                      key={order.id}
+                      id={`order-row-${order.id}`}
+                      className="hover:bg-zinc-800/20 transition-colors group cursor-pointer"
+                      onClick={() => setSelectedOrder(order)}
+                    >
+                      {/* ID */}
+                      <td className="py-3.5 px-4 font-mono font-bold">
+                        <span className="text-amber-500">#{order.id.slice(-4).toUpperCase()}</span>
+                      </td>
+
+                      {/* Mesa & Comensal */}
+                      <td className="py-3.5 px-4">
+                        <div className="space-y-0.5">
+                          <span className={`font-bold ${classes.textPrimary} block flex items-center gap-1`}>
+                            <MapPin className="w-3 h-3 text-amber-500 shrink-0" />
+                            {order.tableName || 'Mesa'}
                           </span>
-                        </td>
-                        <td className={`p-3 font-mono ${classes.textSecondary} whitespace-nowrap`}>
-                          <span className={`${classes.textMuted} text-[10px] mr-1.5`}>{formatDay(o.createdAt)}</span>
-                          {formatClock(o.createdAt)}
-                        </td>
-                        <td className={`p-3 font-mono whitespace-nowrap ${r.isLive ? 'text-amber-500 font-bold' : classes.textSecondary}`}>
-                          {formatDuration(r.durationMs)}
-                          {r.isLive && <span className="ml-1 text-[9px] uppercase opacity-70">en curso</span>}
-                        </td>
-                        <td className="p-3">
-                          {o.cashCloseId ? (
-                            <span className={`inline-flex items-center gap-1 text-[9px] font-mono font-bold ${classes.textMuted}`} title="Congelado por un cierre de caja">
-                              <Lock className="w-2.5 h-2.5" /> Cerrado
+                          {order.dinerName && (
+                            <span className={`text-[11px] ${classes.textMuted} flex items-center gap-1`}>
+                              <User className="w-3 h-3 text-zinc-500 shrink-0" />
+                              {order.dinerName}
                             </span>
-                          ) : (
-                            <span className="text-[9px] font-mono font-bold text-emerald-500/70">Abierto</span>
                           )}
-                        </td>
-                      </tr>
+                        </div>
+                      </td>
 
-                      {/* Expanded detail: the line items and their specifications */}
-                      {isOpen && (
-                        <tr className={classes.inputBg}>
-                          <td colSpan={10} className="px-3 pb-4 pt-1">
-                            <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-4 space-y-3`}>
-                              <div className="space-y-2">
-                                {o.items.map((i) => (
-                                  <div key={i.id} className={`flex items-start justify-between gap-4 pb-2 border-b ${classes.borderDivider} last:border-0 last:pb-0`}>
-                                    <div className="min-w-0">
-                                      <p className={`text-xs font-medium ${classes.textPrimary}`}>
-                                        <span className="font-mono text-amber-500 font-bold mr-2">{i.quantity}x</span>
-                                        {i.name}
-                                      </p>
-                                      {i.comment && (
-                                        <div className={`mt-1.5 ml-6 px-2 py-1.5 border-l-2 border-amber-500 bg-amber-500/5 text-amber-500 text-[10px] font-medium italic ${classes.radiusCard}`}>
-                                          "{i.comment}"
-                                        </div>
-                                      )}
-                                    </div>
-                                    <div className="text-right shrink-0 font-mono">
-                                      <span className={`block text-[10px] ${classes.textMuted}`}>{formatPrice(i.price)} c/u</span>
-                                      <span className={`block text-xs font-bold ${classes.textPrimary}`}>{formatPrice(i.price * i.quantity)}</span>
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
+                      {/* Fecha y Hora */}
+                      <td className="py-3.5 px-4 whitespace-nowrap">
+                        <div className="space-y-0.5">
+                          <span className={`font-mono font-bold ${classes.textPrimary} block`}>
+                            {timeFormatted}
+                          </span>
+                          <span className={`text-[10px] font-mono ${classes.textMuted} block`}>
+                            {dateFormatted}
+                          </span>
+                        </div>
+                      </td>
 
-                              {/* Per-order metadata that has no column of its own */}
-                              <div className={`grid grid-cols-2 md:grid-cols-4 gap-3 pt-3 border-t ${classes.borderCard}`}>
-                                {[
-                                  { label: 'Creado', value: `${formatDay(o.createdAt)} ${formatClock(o.createdAt)}` },
-                                  { label: 'Última actualización', value: `${formatDay(o.updatedAt)} ${formatClock(o.updatedAt)}` },
-                                  { label: 'Entregado', value: o.deliveredAt ? `${formatDay(o.deliveredAt)} ${formatClock(o.deliveredAt)}` : '—' },
-                                  { label: 'Pago', value: o.paymentStatus === 'paid' ? 'Pagado' : o.paymentStatus === 'pending' ? 'Pendiente' : '—' },
-                                ].map((m) => (
-                                  <div key={m.label}>
-                                    <span className={`text-[9px] ${classes.textMuted} font-mono font-black uppercase tracking-widest block`}>{m.label}</span>
-                                    <span className={`text-[11px] font-mono ${classes.textSecondary}`}>{m.value}</span>
-                                  </div>
-                                ))}
-                              </div>
+                      {/* Items */}
+                      <td className="py-3.5 px-4 max-w-xs">
+                        <div className="space-y-1">
+                          <p className={`truncate font-medium ${classes.textPrimary}`} title={order.items.map((i) => `${i.quantity}x ${i.name}`).join(', ')}>
+                            {order.items.map((i) => `${i.quantity}x ${i.name}`).join(', ')}
+                          </p>
+                          <span className={`text-[10px] ${classes.textMuted} font-mono block`}>
+                            {itemCount} {itemCount === 1 ? 'unidad' : 'unidades'} ({order.items.length} {order.items.length === 1 ? 'producto' : 'productos'})
+                          </span>
+                        </div>
+                      </td>
 
-                              {o.cancellationReason && (
-                                <div className="px-3 py-2 bg-rose-500/5 border border-rose-500/20 rounded-lg">
-                                  <span className="text-[9px] text-rose-400 font-mono font-black uppercase tracking-widest block">Motivo de cancelación</span>
-                                  <span className="text-[11px] text-rose-300">{o.cancellationReason}</span>
-                                </div>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </React.Fragment>
+                      {/* Estado */}
+                      <td className="py-3.5 px-4 whitespace-nowrap">
+                        {getStatusBadge(order.status)}
+                      </td>
+
+                      {/* Pago */}
+                      <td className="py-3.5 px-4 whitespace-nowrap">
+                        {getPaymentBadge(order.paymentStatus)}
+                      </td>
+
+                      {/* Total */}
+                      <td className="py-3.5 px-4 text-right whitespace-nowrap">
+                        <span className={`font-mono font-black text-sm ${order.status === 'Cancelado' ? 'line-through text-zinc-500' : 'text-amber-500'}`}>
+                          {formatPrice(total)}
+                        </span>
+                      </td>
+
+                      {/* Acciones */}
+                      <td className="py-3.5 px-4 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center justify-center gap-1.5">
+                          <button
+                            id={`btn-view-order-${order.id}`}
+                            onClick={() => setSelectedOrder(order)}
+                            className={`p-1.5 ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 text-zinc-400 hover:text-amber-400 transition`}
+                            title="Ver detalle del pedido"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            id={`btn-print-order-${order.id}`}
+                            onClick={() => printKitchenTicket(order)}
+                            className={`p-1.5 ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 text-zinc-400 hover:text-amber-400 transition`}
+                            title="Imprimir comanda térmica"
+                          >
+                            <Printer className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
                   );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
 
-        {/* Pagination */}
-        {sorted.length > PAGE_SIZE && (
-          <div className={`flex items-center justify-between gap-3 px-4 py-3 border-t ${classes.borderCard}`}>
-            <span className={`text-[10px] font-mono ${classes.textMuted}`}>
-              Página {safePage + 1} de {pageCount}
-            </span>
+        {/* Pagination Controls */}
+        {filteredOrders.length > 0 && (
+          <div className={`p-3.5 border-t ${classes.borderCard} flex flex-wrap items-center justify-between gap-3 text-xs`}>
+            <div className={`flex items-center gap-2 ${classes.textMuted}`}>
+              <span>Mostrar</span>
+              <select
+                value={pageSize}
+                onChange={(e) => {
+                  setPageSize(Number(e.target.value));
+                  setCurrentPage(1);
+                }}
+                className={`px-2 py-1 ${classes.inputBg} border ${classes.borderCard} ${classes.radiusBtn} ${classes.textPrimary} focus:outline-none`}
+              >
+                <option value={10}>10</option>
+                <option value={15}>15</option>
+                <option value={25}>25</option>
+                <option value={50}>50</option>
+              </select>
+              <span>por página</span>
+              <span className="hidden sm:inline">· Total: {filteredOrders.length} pedidos</span>
+            </div>
+
             <div className="flex items-center gap-2">
-              <button
-                id="orders-table-prev"
-                onClick={() => setPage((p) => Math.max(0, p - 1))}
-                disabled={safePage === 0}
-                className={`px-3 py-1.5 ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} ${classes.textSecondary} hover:border-amber-500 text-[10px] font-black uppercase tracking-widest transition flex items-center gap-1 disabled:opacity-30 disabled:cursor-not-allowed`}
-              >
-                <ChevronLeft className="w-3 h-3" /> Anterior
-              </button>
-              <button
-                id="orders-table-next"
-                onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
-                disabled={safePage >= pageCount - 1}
-                className={`px-3 py-1.5 ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} ${classes.textSecondary} hover:border-amber-500 text-[10px] font-black uppercase tracking-widest transition flex items-center gap-1 disabled:opacity-30 disabled:cursor-not-allowed`}
-              >
-                Siguiente <ChevronRight className="w-3 h-3" />
-              </button>
+              <span className={`text-xs font-mono ${classes.textMuted}`}>
+                Página {currentPage} de {totalPages}
+              </span>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                  className={`p-1.5 ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 ${classes.textPrimary} disabled:opacity-30 disabled:cursor-not-allowed transition`}
+                  title="Página anterior"
+                >
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={currentPage === totalPages}
+                  className={`p-1.5 ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 ${classes.textPrimary} disabled:opacity-30 disabled:cursor-not-allowed transition`}
+                  title="Página siguiente"
+                >
+                  <ChevronRight className="w-4 h-4" />
+                </button>
+              </div>
             </div>
           </div>
         )}
       </div>
+
+      {/* Modal: Order Detail */}
+      {selectedOrder && (
+        <div
+          id="order-detail-modal"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fade-in"
+          onClick={() => setSelectedOrder(null)}
+        >
+          <div
+            className={`w-full max-w-lg ${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} overflow-hidden shadow-2xl space-y-4`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className={`p-4 border-b ${classes.borderCard} flex items-center justify-between`}>
+              <div className="space-y-0.5">
+                <div className="flex items-center gap-2">
+                  <h3 className={`text-base font-black ${classes.textPrimary}`}>
+                    Pedido #{selectedOrder.id.slice(-4).toUpperCase()}
+                  </h3>
+                  {getStatusBadge(selectedOrder.status)}
+                </div>
+                <p className={`text-xs ${classes.textMuted}`}>
+                  {selectedOrder.tableName} {selectedOrder.dinerName ? `· ${selectedOrder.dinerName}` : ''}
+                </p>
+              </div>
+
+              <button
+                id="btn-close-order-detail-modal"
+                onClick={() => setSelectedOrder(null)}
+                className={`p-1.5 ${classes.radiusBtn} text-zinc-400 hover:${classes.textPrimary} hover:bg-zinc-800/50 transition`}
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            <div className="p-4 space-y-4 max-h-[70vh] overflow-y-auto">
+              {/* Order Metadata Grid */}
+              <div className="grid grid-cols-2 gap-2 text-xs bg-zinc-950/40 p-3 rounded-lg border border-zinc-800/60">
+                <div>
+                  <span className={`text-[10px] font-black uppercase ${classes.textMuted} block`}>Fecha de Creación</span>
+                  <span className={`font-mono font-bold ${classes.textPrimary}`}>
+                    {new Date(selectedOrder.createdAt).toLocaleString('es-AR')}
+                  </span>
+                </div>
+                {selectedOrder.deliveredAt && (
+                  <div>
+                    <span className={`text-[10px] font-black uppercase ${classes.textMuted} block`}>Entregado a las</span>
+                    <span className={`font-mono font-bold text-emerald-400`}>
+                      {new Date(selectedOrder.deliveredAt).toLocaleTimeString('es-AR')}
+                    </span>
+                  </div>
+                )}
+                <div>
+                  <span className={`text-[10px] font-black uppercase ${classes.textMuted} block`}>Estado de Pago</span>
+                  <div className="mt-0.5">{getPaymentBadge(selectedOrder.paymentStatus)}</div>
+                </div>
+                {selectedOrder.cashCloseId && (
+                  <div>
+                    <span className={`text-[10px] font-black uppercase ${classes.textMuted} block`}>Cierre de Caja</span>
+                    <span className="font-mono text-zinc-400">
+                      #{selectedOrder.cashCloseId.slice(-6).toUpperCase()}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Cancellation notice if any */}
+              {selectedOrder.status === 'Cancelado' && (
+                <div className="p-3 bg-rose-500/10 border border-rose-500/30 rounded-lg flex items-start gap-2.5 text-xs text-rose-400">
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <span className="font-bold uppercase tracking-wider block">Pedido Cancelado</span>
+                    <p className="text-zinc-300">
+                      {selectedOrder.cancellationReason || 'Sin motivo especificado'}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Items Breakdown */}
+              <div className="space-y-2">
+                <span className={`text-[10px] font-black uppercase tracking-wider ${classes.textMuted} block`}>
+                  Detalle de Comanda ({selectedOrder.items.length} {selectedOrder.items.length === 1 ? 'ítem' : 'ítems'})
+                </span>
+                <div className="divide-y divide-zinc-800/40 border border-zinc-800/60 rounded-lg overflow-hidden">
+                  {selectedOrder.items.map((item, idx) => (
+                    <div key={idx} className="p-3 flex items-start justify-between gap-3 bg-zinc-950/20">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="w-5 h-5 rounded bg-amber-500/15 text-amber-400 font-mono font-bold text-xs flex items-center justify-center">
+                            {item.quantity}x
+                          </span>
+                          <span className={`font-bold text-xs ${classes.textPrimary}`}>
+                            {item.name}
+                          </span>
+                        </div>
+                        {item.comment && (
+                          <p className="text-[11px] text-amber-400/90 italic pl-7">
+                            "{item.comment}"
+                          </p>
+                        )}
+                      </div>
+                      <div className="text-right">
+                        <span className={`font-mono font-bold text-xs ${classes.textPrimary} block`}>
+                          {formatPrice(item.price * item.quantity)}
+                        </span>
+                        {item.quantity > 1 && (
+                          <span className={`font-mono text-[10px] ${classes.textMuted} block`}>
+                            {formatPrice(item.price)} c/u
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Total Calculation Strip */}
+              <div className="p-3.5 bg-zinc-950/60 border border-zinc-800/80 rounded-lg flex items-center justify-between">
+                <span className={`text-xs font-black uppercase tracking-wider ${classes.textPrimary}`}>
+                  Total de la Comanda
+                </span>
+                <span className={`text-lg font-mono font-black ${selectedOrder.status === 'Cancelado' ? 'line-through text-zinc-500' : 'text-amber-500'}`}>
+                  {formatPrice(getOrderTotal(selectedOrder))}
+                </span>
+              </div>
+            </div>
+
+            {/* Modal Footer Actions */}
+            <div className={`p-4 border-t ${classes.borderCard} flex items-center justify-between gap-3 bg-zinc-950/20`}>
+              <button
+                id="btn-modal-print-kitchen-ticket"
+                onClick={() => printKitchenTicket(selectedOrder)}
+                className={`px-3.5 py-2 ${classes.radiusBtn} text-xs font-black uppercase tracking-wider ${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 ${classes.textPrimary} transition flex items-center gap-2`}
+              >
+                <Printer className="w-4 h-4 text-amber-500" />
+                <span>Imprimir Comanda</span>
+              </button>
+
+              <button
+                id="btn-modal-close-detail"
+                onClick={() => setSelectedOrder(null)}
+                className={`px-4 py-2 ${classes.radiusBtn} text-xs font-black uppercase tracking-wider bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition`}
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -34,7 +34,10 @@ import {
   AlertCircle,
   Lock,
   Database,
-  LayoutGrid
+  LayoutGrid,
+  Receipt,
+  FileText,
+  History,
 } from 'lucide-react';
 import {
   Establishment,
@@ -42,6 +45,7 @@ import {
   MenuItem,
   Table,
   Order,
+  OrderItem,
   OrderStatus,
   UserSession,
   UserRole,
@@ -49,13 +53,20 @@ import {
   CashClose,
   CashClosePreview,
   MetricsSummary,
+  TableCloseReceipt,
 } from '../types';
 import { playNewOrderSound, playAlertSound } from './SoundUtility';
 import { useTheme } from '../theme/ThemeContext';
 import ThemeTriggerButton from './ThemeTriggerButton';
 import MetricsDashboard from './MetricsDashboard';
 import OrdersTable from './OrdersTable';
-import { printKitchenTicket, printTableBill } from '../lib/thermalPrint';
+import {
+  printKitchenTicket,
+  printTableBill,
+  printTableCloseReceipt,
+  downloadTableBillTxt,
+  downloadTableCloseReceiptTxt,
+} from '../lib/thermalPrint';
 
 interface AdminViewProps {
   onBackToLauncher: () => void;
@@ -118,6 +129,9 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   // Mutation and Selection modallers
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [isCancelModalOpen, setIsCancelModalOpen] = useState(false);
+  const [cancelTargetMode, setCancelTargetMode] = useState<'item' | 'order'>('item');
+  const [selectedOrderItemId, setSelectedOrderItemId] = useState<string>('');
+  const [cancelQuantity, setCancelQuantity] = useState<number>(1);
   const [cancellationReason, setCancellationReason] = useState('');
   const [disableItemOnCancelId, setDisableItemOnCancelId] = useState<string>(''); // For RF-A07
   
@@ -136,6 +150,13 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
 
   // Table Bill Modal (shown before closing a table)
   const [billModalTableId, setBillModalTableId] = useState<string | null>(null);
+
+  // Table Closes History Modal
+  const [tableCloses, setTableCloses] = useState<TableCloseReceipt[]>([]);
+  const [isTableClosesModalOpen, setIsTableClosesModalOpen] = useState(false);
+  const [selectedTableCloseReceipt, setSelectedTableCloseReceipt] = useState<TableCloseReceipt | null>(null);
+  const [tableCloseSearchQuery, setTableCloseSearchQuery] = useState('');
+  const [tableCloseDateFilter, setTableCloseDateFilter] = useState<'all' | 'today' | 'week'>('all');
 
   // Filters
   const [menuSearch, setMenuSearch] = useState('');
@@ -260,10 +281,26 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       orderCountRef.current = currentReceivedOrders;
       callCountRef.current = currentPendingCalls;
 
+      // Also refresh table close receipts
+      fetchTableCloses();
+
     } catch (err) {
       console.error('Error fetching admin data', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchTableCloses = async () => {
+    if (!currentUser) return;
+    try {
+      const res = await fetch('/api/my/table-closes', { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) setTableCloses(data);
+      }
+    } catch (err) {
+      console.error('Error fetching table closes', err);
     }
   };
 
@@ -298,6 +335,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       });
       if (res.ok) {
         await fetchDbState();
+        await fetchTableCloses();
       } else {
         const data = await res.json().catch(() => ({}));
         alert(data.error || 'No se pudo cerrar la mesa porque ya se encuentra cerrada o no tiene pedidos activos.');
@@ -412,7 +450,86 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     }
   };
 
-  // Trigger Cancel logic with optional desactived item integration (RF-A06, RF-A07)
+  // Open cancel modal focused on a single dish
+  const handleOpenCancelItem = (ord: Order, item: OrderItem) => {
+    setSelectedOrder(ord);
+    setCancelTargetMode('item');
+    setSelectedOrderItemId(item.id);
+    setCancelQuantity(item.quantity);
+    setDisableItemOnCancelId(item.menuItemId);
+    setCancellationReason('');
+    setIsCancelModalOpen(true);
+  };
+
+  // Open cancel modal for the order (with choice to cancel 1 item or entire order)
+  const handleOpenCancelOrder = (ord: Order) => {
+    setSelectedOrder(ord);
+    setCancelTargetMode(ord.items.length > 1 ? 'item' : 'order');
+    const firstItem = ord.items[0];
+    setSelectedOrderItemId(firstItem?.id || '');
+    setCancelQuantity(firstItem?.quantity || 1);
+    setDisableItemOnCancelId(firstItem?.menuItemId || '');
+    setCancellationReason('');
+    setIsCancelModalOpen(true);
+  };
+
+  // Cancel or reduce quantity of an individual dish/item in an order
+  const handleCancelItemFromOrder = async () => {
+    if (!selectedOrder || !selectedOrderItemId) return;
+    const targetItem = selectedOrder.items.find(i => i.id === selectedOrderItemId);
+    if (!targetItem) return;
+
+    try {
+      const res = await fetch(`/api/orders/${selectedOrder.id}/cancel-item`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          orderItemId: selectedOrderItemId,
+          quantity: cancelQuantity > 0 ? cancelQuantity : undefined,
+          cancellationReason: cancellationReason.trim() || `Cancelado plato: ${targetItem.name}`,
+        }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || 'Failed to cancel item');
+      }
+
+      // If an item was marked to be disabled due to lack of stock
+      if (disableItemOnCancelId && currentUser?.role === 'admin') {
+        const itemToDisable = menuItems.find(m => m.id === disableItemOnCancelId);
+        if (itemToDisable) {
+          const payload = {
+            ...itemToDisable,
+            available: false
+          };
+          const itemRes = await fetch('/api/menu-items', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify(payload)
+          });
+          if (!itemRes.ok) {
+            console.error('Failed to disable menu item after cancellation');
+          }
+        }
+      }
+
+      playAlertSound();
+      fetchDbState();
+      setIsCancelModalOpen(false);
+      setSelectedOrder(null);
+      setSelectedOrderItemId('');
+      setCancellationReason('');
+      setDisableItemOnCancelId('');
+    } catch (e: any) {
+      console.error(e);
+      alert(e.message || 'Error al cancelar el plato del pedido.');
+    }
+  };
+
+  // Trigger Cancel whole order logic with optional disabled item integration (RF-A06, RF-A07)
   const handleCancelOrder = async () => {
     if (!selectedOrder) return;
     
@@ -455,6 +572,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       fetchDbState();
       setIsCancelModalOpen(false);
       setSelectedOrder(null);
+      setSelectedOrderItemId('');
       setCancellationReason('');
       setDisableItemOnCancelId('');
 
@@ -691,6 +809,31 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   const activeEstablishment = useMemo(() => {
     return establishments.find(e => e.id === activeEstId) || null;
   }, [establishments, activeEstId]);
+
+  const filteredTableCloses = useMemo(() => {
+    let list = tableCloses;
+
+    if (tableCloseDateFilter === 'today') {
+      const todayStr = new Date().toISOString().slice(0, 10);
+      list = list.filter((tc) => tc.closedAt.startsWith(todayStr));
+    } else if (tableCloseDateFilter === 'week') {
+      const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      list = list.filter((tc) => new Date(tc.closedAt).getTime() >= sevenDaysAgo);
+    }
+
+    if (tableCloseSearchQuery.trim()) {
+      const q = tableCloseSearchQuery.toLowerCase().trim();
+      list = list.filter(
+        (tc) =>
+          tc.tableName.toLowerCase().includes(q) ||
+          (tc.closedByName && tc.closedByName.toLowerCase().includes(q)) ||
+          tc.dinerNames.some((d) => d.toLowerCase().includes(q)) ||
+          tc.orders.some((o) => o.items.some((i) => i.name.toLowerCase().includes(q)))
+      );
+    }
+
+    return list;
+  }, [tableCloses, tableCloseDateFilter, tableCloseSearchQuery]);
 
   const formatPrice = (price: number) => {
     return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', minimumFractionDigits: 0 }).format(price);
@@ -1099,18 +1242,6 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
           </div>
 
           <div className="flex items-center gap-3 self-end md:self-auto">
-            {/* Seed demo data button */}
-            <button
-              id="btn-seed-demo-data"
-              onClick={handleSeedDemoData}
-              disabled={isSeeding}
-              className={`px-3 py-2 text-xs font-mono font-bold ${classes.bgCard} border ${classes.borderCard} ${classes.radiusBtn} hover:border-amber-500 ${classes.textSecondary} hover:${classes.textPrimary} transition cursor-pointer flex items-center space-x-1.5 disabled:opacity-50`}
-              title="Cargar o restaurar datos demo de la cafetería y el bodegón"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 text-amber-500 ${isSeeding ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">Cargar Datos Demo</span>
-            </button>
-
             {/* Style / Theme selector button (visible in admin panel) */}
             <ThemeTriggerButton variant="inline" />
 
@@ -1422,21 +1553,37 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                           </div>
 
                           {/* Items listing */}
-                          <div className="space-y-3">
+                          <div className="space-y-2">
                             {ord.items.map((i) => (
-                              <div key={i.id} className="text-xs">
-                                <div className="flex items-start justify-between">
-                                  <p className={`font-medium ${classes.textPrimary}`}>
-                                    <span className="font-mono text-amber-500 font-bold mr-2">{i.quantity}x</span>
-                                    {i.name}
-                                  </p>
-                                  <span className={`text-[10px] font-mono ${classes.textMuted} font-bold`}>{formatPrice(i.price * i.quantity)}</span>
-                                </div>
-                                {i.comment && (
-                                  <div className={`mt-1.5 ml-6 px-2 py-1.5 border-l-2 border-amber-500 bg-amber-500/5 text-amber-500 text-[10px] font-medium leading-normal ${classes.radiusCard} max-w-xs truncate italic`}>
-                                    "{i.comment}"
+                              <div
+                                key={i.id}
+                                className={`text-xs p-2 rounded-xl ${classes.inputBg} border ${classes.borderCard} flex items-start justify-between gap-2`}
+                              >
+                                <div className="flex-1 min-w-0">
+                                  <div className="flex items-start justify-between gap-2">
+                                    <p className={`font-medium ${classes.textPrimary}`}>
+                                      <span className="font-mono text-amber-500 font-bold mr-2">{i.quantity}x</span>
+                                      {i.name}
+                                    </p>
+                                    <span className={`text-[10px] font-mono ${classes.textMuted} font-bold shrink-0`}>
+                                      {formatPrice(i.price * i.quantity)}
+                                    </span>
                                   </div>
-                                )}
+                                  {i.comment && (
+                                    <div className={`mt-1 ml-5 px-2 py-1 border-l-2 border-amber-500 bg-amber-500/5 text-amber-500 text-[10px] font-medium leading-normal ${classes.radiusCard} max-w-xs truncate italic`}>
+                                      "{i.comment}"
+                                    </div>
+                                  )}
+                                </div>
+
+                                <button
+                                  id={`btn-cancel-item-${i.id}`}
+                                  onClick={() => handleOpenCancelItem(ord, i)}
+                                  className="p-1 rounded-lg text-zinc-400 hover:text-rose-400 hover:bg-rose-500/10 border border-transparent hover:border-rose-500/30 transition shrink-0 cursor-pointer"
+                                  title={`Cancelar plato (${i.name})`}
+                                >
+                                  <Trash className="w-3.5 h-3.5" />
+                                </button>
                               </div>
                             ))}
                           </div>
@@ -1461,10 +1608,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
 
                             <button
                               id={`btn-cancel-order-${ord.id}`}
-                              onClick={() => {
-                                setSelectedOrder(ord);
-                                setIsCancelModalOpen(true);
-                              }}
+                              onClick={() => handleOpenCancelOrder(ord)}
                               className={`px-3 py-2 ${classes.radiusBtn} text-xs font-black uppercase tracking-widest text-rose-500 hover:bg-rose-500/10 border ${classes.borderCard} transition cursor-pointer`}
                               title="Cancelar Pedido con justificación"
                             >
@@ -1510,20 +1654,38 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                   <p className={`text-xs ${classes.textMuted} font-medium`}>Administra los códigos QR de cada mesa. Los códigos enlazan automáticamente la mesa con el pedido.</p>
                 </div>
 
-                {/* Creating tables is admin-only (the server rejects it for a waiter). */}
-                {currentUser.role === 'admin' && (
+                {/* Actions toolbar */}
+                <div className="flex items-center gap-2.5 flex-wrap">
                   <button
-                    id="btn-create-table"
-                    onClick={() => {
-                      setEditingTable({ name: '', active: true });
-                      setIsTableModalOpen(true);
-                    }}
-                    className={`px-4.5 py-3 ${classes.radiusBtn} text-xs font-black text-zinc-950 bg-amber-500 hover:bg-amber-400 transition flex items-center space-x-2 cursor-pointer uppercase tracking-widest shadow-md`}
+                    id="btn-open-table-closes-history"
+                    onClick={() => setIsTableClosesModalOpen(true)}
+                    className={`px-4 py-3 ${classes.radiusBtn} text-xs font-black ${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 ${classes.textPrimary} transition flex items-center space-x-2 cursor-pointer uppercase tracking-widest shadow-sm`}
+                    title="Ver historial de mesas cerradas y reimprimir/descargar tickets"
                   >
-                    <Plus className="w-4 h-4" />
-                    <span>Crear Nueva Mesa</span>
+                    <Receipt className="w-4 h-4 text-amber-500" />
+                    <span>Historial de Cierres</span>
+                    {tableCloses.length > 0 && (
+                      <span className="px-2 py-0.5 text-[10px] font-mono font-bold rounded-full bg-amber-500/20 text-amber-400">
+                        {tableCloses.length}
+                      </span>
+                    )}
                   </button>
-                )}
+
+                  {/* Creating tables is admin-only (the server rejects it for a waiter). */}
+                  {currentUser.role === 'admin' && (
+                    <button
+                      id="btn-create-table"
+                      onClick={() => {
+                        setEditingTable({ name: '', active: true });
+                        setIsTableModalOpen(true);
+                      }}
+                      className={`px-4.5 py-3 ${classes.radiusBtn} text-xs font-black text-zinc-950 bg-amber-500 hover:bg-amber-400 transition flex items-center space-x-2 cursor-pointer uppercase tracking-widest shadow-md`}
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>Crear Nueva Mesa</span>
+                    </button>
+                  )}
+                </div>
               </div>
 
               {/* Grid of tables */}
@@ -1644,7 +1806,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                             title="Descargar carpa de mesa tamaño grande listo para imprimir"
                           >
                             <Download className="w-3 h-3" />
-                            <span>Carpa</span>
+                            <span>Descargar</span>
                           </button>
                         </div>
                       </div>
@@ -1888,31 +2050,70 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
           {/* TAB: Cash close — available to admin and waiter (shift work). */}
           {activeTab === 'caja' && (
             <div className="space-y-6">
-              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 space-y-2`}>
+              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 space-y-4`}>
                 <div className="flex items-center justify-between flex-wrap gap-2">
-                  <h2 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>Control y Cierre de Caja</h2>
+                  <div>
+                    <h2 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>Control y Cierre de Caja</h2>
+                    <p className={`text-[11px] ${classes.textMuted} mt-0.5`}>
+                      Gestión operativa de arqueo de caja chica, turnos y recaudación del establecimiento.
+                    </p>
+                  </div>
                   {cashPreview?.isOpen ? (
-                    <div className="flex items-center space-x-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] font-black uppercase tracking-wider font-mono">
+                    <div className="flex items-center space-x-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] font-black uppercase tracking-wider font-mono">
                       <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
                       <span>Caja Abierta (Turno Activo)</span>
                     </div>
                   ) : (
-                    <div className="flex items-center space-x-2 px-3 py-1 rounded-full bg-zinc-500/10 border border-zinc-500/30 text-zinc-400 text-[10px] font-black uppercase tracking-wider font-mono">
+                    <div className="flex items-center space-x-2 px-3 py-1.5 rounded-full bg-zinc-500/10 border border-zinc-500/30 text-zinc-400 text-[10px] font-black uppercase tracking-wider font-mono">
                       <span className="w-2 h-2 rounded-full bg-zinc-500" />
                       <span>Caja Cerrada</span>
                     </div>
                   )}
                 </div>
-                <p className={`text-xs ${classes.textMuted} font-medium`}>
-                  {cashPreview?.isOpen ? (
-                    <>
-                      Turno iniciado por <span className="font-bold text-amber-500">{cashPreview.openedByName || cashPreview.openedByEmail || 'Personal'}</span> el {formatDateTime(cashPreview.periodStart || '')}.
-                      {cashPreview.initialAmount ? ` Fondo inicial de cambio: ${formatPrice(cashPreview.initialAmount)}.` : ''}
-                    </>
-                  ) : (
-                    'La caja se encuentra cerrada. Debe realizar la apertura de caja para iniciar el turno antes de poder operar o realizar un cierre.'
-                  )}
-                </p>
+
+                {cashPreview?.isOpen ? (
+                  <div className={`pt-3 border-t ${classes.borderCard} grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs`}>
+                    <div className={`p-3 ${classes.inputBg} border ${classes.borderCard} ${classes.radiusCard} space-y-1`}>
+                      <span className={`text-[9px] ${classes.textMuted} font-mono font-bold uppercase tracking-wider block`}>
+                        Responsable de turno
+                      </span>
+                      <p className={`font-bold ${classes.textPrimary} truncate`}>
+                        {cashPreview.openedByName || cashPreview.openedByEmail || 'Personal'}
+                      </p>
+                    </div>
+
+                    <div className={`p-3 ${classes.inputBg} border ${classes.borderCard} ${classes.radiusCard} space-y-1`}>
+                      <span className={`text-[9px] ${classes.textMuted} font-mono font-bold uppercase tracking-wider block`}>
+                        Apertura de turno
+                      </span>
+                      <p className={`font-mono text-[11px] font-semibold ${classes.textPrimary}`}>
+                        {formatDateTime(cashPreview.periodStart || '')}
+                      </p>
+                    </div>
+
+                    <div className={`p-3 ${classes.inputBg} border ${classes.borderCard} ${classes.radiusCard} space-y-1`}>
+                      <span className={`text-[9px] ${classes.textMuted} font-mono font-bold uppercase tracking-wider block`}>
+                        Fondo Inicial de Cambio ($)
+                      </span>
+                      <p className="font-mono font-black text-amber-500 text-sm">
+                        {formatPrice(cashPreview.initialAmount ?? 0)}
+                      </p>
+                    </div>
+
+                    <div className={`p-3 ${classes.inputBg} border ${classes.borderCard} ${classes.radiusCard} space-y-1`}>
+                      <span className={`text-[9px] ${classes.textMuted} font-mono font-bold uppercase tracking-wider block`}>
+                        Observación de apertura
+                      </span>
+                      <p className={`text-[11px] ${cashPreview.openNote ? classes.textSecondary : classes.textMuted} italic truncate`} title={cashPreview.openNote || 'Sin observación'}>
+                        {cashPreview.openNote ? `"${cashPreview.openNote}"` : 'Sin observación registrada'}
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <p className={`text-xs ${classes.textMuted} font-medium pt-1 border-t ${classes.borderCard}`}>
+                    La caja se encuentra cerrada. Debe realizar la apertura de caja e indicar el fondo inicial de cambio para iniciar el turno antes de operar pedidos o realizar un arqueo de cierre.
+                  </p>
+                )}
               </div>
 
               {/* Notice if there are active orders pending in kitchen or tables */}
@@ -1972,6 +2173,20 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       </span>
                     </div>
                   </div>
+
+                  {cashPreview.openNote && (
+                    <div className={`p-3 rounded-xl ${classes.inputBg} border ${classes.borderCard} flex items-start gap-2.5 text-xs`}>
+                      <span className="text-amber-500 text-sm leading-none mt-0.5">💬</span>
+                      <div>
+                        <span className={`text-[9px] font-mono font-bold uppercase tracking-wider ${classes.textMuted} block`}>
+                          Observación de apertura registrada
+                        </span>
+                        <p className={`text-xs ${classes.textSecondary} italic mt-0.5 font-medium`}>
+                          "{cashPreview.openNote}"
+                        </p>
+                      </div>
+                    </div>
+                  )}
 
                   <div className={`border-t ${classes.borderCard} pt-4 flex gap-6`}>
                     <div className="space-y-1">
@@ -2038,7 +2253,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                         Caja cerrada — No hay turno activo
                       </h3>
                       <p className={`text-xs ${classes.textMuted}`}>
-                        La caja se encuentra cerrada. Para comenzar a imputar cobros y pedidos al arqueo de caja, debes iniciar un nuevo turno.
+                        La caja se encuentra cerrada. Para comenzar a imputar cobros y pedidos al arqueo de caja, debes iniciar un nuevo turno indicando el fondo de cambio disponible.
                       </p>
                     </div>
                   </div>
@@ -2078,7 +2293,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 font-mono">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4 font-mono">
                     <div>
                       <span className={`text-[9px] ${classes.textMuted} uppercase block tracking-widest`}>Responsable</span>
                       <span className={`text-xs font-black ${classes.textPrimary}`}>{lastReceipt.closedByName}</span>
@@ -2088,14 +2303,41 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       <span className={`text-xs font-black ${classes.textPrimary}`}>{formatDateTime(lastReceipt.periodEnd)}</span>
                     </div>
                     <div>
-                      <span className={`text-[9px] ${classes.textMuted} uppercase block tracking-widest`}>Pedidos</span>
-                      <span className={`text-xs font-black ${classes.textPrimary}`}>{lastReceipt.totals.orderCount}</span>
+                      <span className={`text-[9px] ${classes.textMuted} uppercase block tracking-widest`}>Fondo Inicial</span>
+                      <span className={`text-xs font-black ${classes.textPrimary}`}>{formatPrice(lastReceipt.initialAmount ?? 0)}</span>
                     </div>
                     <div>
-                      <span className={`text-[9px] ${classes.textMuted} uppercase block tracking-widest`}>Total</span>
+                      <span className={`text-[9px] ${classes.textMuted} uppercase block tracking-widest`}>Ventas</span>
                       <span className="text-xs font-black text-amber-500">{formatPrice(lastReceipt.totals.totalRevenue)}</span>
                     </div>
+                    <div>
+                      <span className={`text-[9px] ${classes.textMuted} uppercase block tracking-widest`}>Total en Caja</span>
+                      <span className="text-xs font-black text-emerald-400">
+                        {formatPrice((lastReceipt.initialAmount ?? 0) + lastReceipt.totals.totalRevenue)}
+                      </span>
+                    </div>
                   </div>
+
+                  {(lastReceipt.openNote || lastReceipt.note) && (
+                    <div className={`border-t ${classes.borderCard} pt-3 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs`}>
+                      {lastReceipt.openNote && (
+                        <div className={`p-2.5 ${classes.inputBg} border ${classes.borderCard} ${classes.radiusCard}`}>
+                          <span className={`text-[9px] ${classes.textMuted} font-mono uppercase tracking-wider block font-bold`}>
+                            Obs. Apertura:
+                          </span>
+                          <span className={`${classes.textSecondary} italic text-[11px]`}>"{lastReceipt.openNote}"</span>
+                        </div>
+                      )}
+                      {lastReceipt.note && (
+                        <div className={`p-2.5 ${classes.inputBg} border ${classes.borderCard} ${classes.radiusCard}`}>
+                          <span className={`text-[9px] ${classes.textMuted} font-mono uppercase tracking-wider block font-bold`}>
+                            Obs. Cierre:
+                          </span>
+                          <span className={`${classes.textSecondary} italic text-[11px]`}>"{lastReceipt.note}"</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {lastReceipt.byTable.length > 0 && (
                     <div className={`border-t ${classes.borderCard} pt-3 space-y-1.5`}>
@@ -2125,10 +2367,22 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                         <div className="space-y-0.5">
                           <span className={`text-xs font-black ${classes.textPrimary} block`}>{formatDateTime(c.periodEnd)}</span>
                           <span className={`text-[10px] ${classes.textMuted} font-mono`}>
-                            {c.closedByName} · {c.totals.orderCount} pedidos
+                            {c.closedByName} · {c.totals.orderCount} pedidos · Fondo: {formatPrice(c.initialAmount ?? 0)}
+                          </span>
+                          {(c.openNote || c.note) && (
+                            <p className={`text-[10px] ${classes.textMuted} italic`}>
+                              {c.openNote ? `Apertura: "${c.openNote}"` : ''}
+                              {c.openNote && c.note ? ' · ' : ''}
+                              {c.note ? `Cierre: "${c.note}"` : ''}
+                            </p>
+                          )}
+                        </div>
+                        <div className="text-right">
+                          <span className="text-sm font-black text-amber-500 font-mono block">{formatPrice(c.totals.totalRevenue)}</span>
+                          <span className="text-[10px] text-emerald-400 font-mono font-bold block">
+                            Total: {formatPrice((c.initialAmount ?? 0) + c.totals.totalRevenue)}
                           </span>
                         </div>
-                        <span className="text-sm font-black text-amber-500 font-mono">{formatPrice(c.totals.totalRevenue)}</span>
                       </div>
                     ))}
                   </div>
@@ -2241,7 +2495,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
         </main>
       </div>
 
-      {/* MODAL 1: Interactive Cancellation Modal featuring item disabler (RF-A07) */}
+      {/* MODAL 1: Interactive Cancellation Modal featuring item or order cancellation */}
       <AnimatePresence>
         {isCancelModalOpen && selectedOrder && (
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -2249,7 +2503,13 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               initial={{ opacity: 0 }}
               animate={{ opacity: 0.5 }}
               exit={{ opacity: 0 }}
-              onClick={() => { setIsCancelModalOpen(false); setCancellationReason(''); setDisableItemOnCancelId(''); }}
+              onClick={() => {
+                setIsCancelModalOpen(false);
+                setSelectedOrder(null);
+                setSelectedOrderItemId('');
+                setCancellationReason('');
+                setDisableItemOnCancelId('');
+              }}
               className={`absolute inset-0 ${classes.glassOverlay}`}
             />
 
@@ -2257,62 +2517,236 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} w-full max-w-md p-6 relative font-sans shadow-2xl`}
+              className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} w-full max-w-lg p-6 relative font-sans shadow-2xl space-y-4`}
             >
-              <div className="flex items-center space-x-2 text-rose-500 mb-4">
-                <AlertTriangle className="w-5 h-5 shrink-0" />
-                <h3 className={`font-black text-sm uppercase tracking-wider ${classes.textPrimary}`}>Cancelar Pedido de {selectedOrder.tableName}</h3>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2 text-rose-500">
+                  <AlertTriangle className="w-5 h-5 shrink-0" />
+                  <h3 className={`font-black text-sm uppercase tracking-wider ${classes.textPrimary}`}>
+                    Cancelación — {selectedOrder.tableName}
+                  </h3>
+                </div>
+                <button
+                  onClick={() => setIsCancelModalOpen(false)}
+                  className={`p-1.5 rounded-lg ${classes.textMuted} hover:${classes.textPrimary} hover:bg-white/5 transition`}
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
 
-              <div className={`space-y-4 text-xs ${classes.textSecondary}`}>
-                <p>El cliente verá reflejado el estado "Cancelado" inmediatamente. Por favor especifica las razones.</p>
-                
-                <div>
-                  <label className={`block text-[10px] uppercase font-mono font-bold tracking-wider ${classes.textMuted} mb-1`}>
-                    Motivo (Opcional)
-                  </label>
-                  <input
-                    id="input-cancellation-reason"
-                    type="text"
-                    placeholder="Ej. Insumo agotado, error de caja..."
-                    value={cancellationReason}
-                    onChange={(e) => setCancellationReason(e.target.value)}
-                    className={`w-full ${classes.inputBg} border ${classes.inputBorder} p-3 ${classes.radiusCard} text-xs ${classes.textPrimary} outline-none focus:border-amber-500 font-mono`}
-                  />
-                </div>
+              {/* Mode switcher tabs */}
+              <div className={`grid grid-cols-2 gap-1.5 p-1 rounded-xl ${classes.inputBg} border ${classes.borderCard}`}>
+                <button
+                  type="button"
+                  id="tab-cancel-single-item"
+                  onClick={() => {
+                    setCancelTargetMode('item');
+                    if (!selectedOrderItemId && selectedOrder.items[0]) {
+                      setSelectedOrderItemId(selectedOrder.items[0].id);
+                      setCancelQuantity(selectedOrder.items[0].quantity);
+                      setDisableItemOnCancelId(selectedOrder.items[0].menuItemId);
+                    }
+                  }}
+                  className={`py-2 px-3 text-xs font-black uppercase tracking-wider rounded-lg transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                    cancelTargetMode === 'item'
+                      ? 'bg-amber-500 text-black shadow-sm'
+                      : `${classes.textMuted} hover:${classes.textPrimary}`
+                  }`}
+                >
+                  <Utensils className="w-3.5 h-3.5" />
+                  <span>Cancelar solo un plato</span>
+                </button>
 
-                {/* RF-A07 Core feature: Disable the causing menu item instantly */}
-                <div className={`${classes.inputBg} border ${classes.borderCard} p-3.5 ${classes.radiusCard} space-y-2`}>
-                  <div className="flex items-center space-x-1.5 text-amber-500 mb-1">
-                    <CheckCircle className="w-4 h-4 shrink-0" />
-                    <span className="font-semibold text-[11px]">Acción Inteligente: Deshabilitar Insumo</span>
-                  </div>
-                  <p className={`text-[10px] ${classes.textMuted} leading-normal mb-2`}>
-                    Si el pedido fracasó porque algún plato se agotó en cocina, elígelo abajo para marcarlo automáticamente como **Agotado / Sin stock** en el menú digital.
-                  </p>
+                <button
+                  type="button"
+                  id="tab-cancel-full-order"
+                  onClick={() => setCancelTargetMode('order')}
+                  className={`py-2 px-3 text-xs font-black uppercase tracking-wider rounded-lg transition flex items-center justify-center gap-1.5 cursor-pointer ${
+                    cancelTargetMode === 'order'
+                      ? 'bg-rose-600 text-white shadow-sm'
+                      : `${classes.textMuted} hover:${classes.textPrimary}`
+                  }`}
+                >
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  <span>Cancelar pedido completo</span>
+                </button>
+              </div>
 
-                  <div className="space-y-1.5">
-                    <label className={`flex items-center space-x-2 p-1 text-[10px] ${classes.textMuted} font-mono font-bold uppercase tracking-wider`}>
-                      <span>Selecciona el plato causante:</span>
+              {/* MODE: Cancel single item */}
+              {cancelTargetMode === 'item' && (
+                <div className={`space-y-4 text-xs ${classes.textSecondary}`}>
+                  <div>
+                    <label className={`block text-[10px] uppercase font-mono font-bold tracking-wider ${classes.textMuted} mb-1.5`}>
+                      Selecciona el plato que deseas cancelar:
                     </label>
                     <select
-                      id="cancellation-item-disabler"
-                      value={disableItemOnCancelId}
-                      onChange={(e) => setDisableItemOnCancelId(e.target.value)}
-                      className={`w-full ${classes.bgCard} border ${classes.borderCard} p-2 ${classes.textPrimary} ${classes.radiusCard} text-xs`}
+                      id="select-cancel-order-item"
+                      value={selectedOrderItemId}
+                      onChange={(e) => {
+                        const id = e.target.value;
+                        setSelectedOrderItemId(id);
+                        const item = selectedOrder.items.find(i => i.id === id);
+                        if (item) {
+                          setCancelQuantity(item.quantity);
+                          setDisableItemOnCancelId(item.menuItemId);
+                        }
+                      }}
+                      className={`w-full ${classes.bgCard} border ${classes.borderCard} p-2.5 ${classes.textPrimary} ${classes.radiusCard} text-xs font-medium outline-none focus:border-amber-500`}
                     >
-                      <option value="">-- No deshabilitar ningún plato --</option>
-                      {selectedOrder.items.map(item => (
-                        <option key={item.id} value={item.menuItemId}>
-                          {item.name}
+                      {selectedOrder.items.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.quantity}x {item.name} — {formatPrice(item.price * item.quantity)}
                         </option>
                       ))}
                     </select>
                   </div>
-                </div>
-              </div>
 
-              <div className={`mt-6 pt-4 border-t ${classes.borderCard} flex items-center justify-end space-x-2.5`}>
+                  {/* Quantity selector if item has more than 1 unit */}
+                  {(() => {
+                    const currentItem = selectedOrder.items.find(i => i.id === selectedOrderItemId) || selectedOrder.items[0];
+                    if (!currentItem || currentItem.quantity <= 1) return null;
+
+                    return (
+                      <div className={`p-3 rounded-xl ${classes.inputBg} border ${classes.borderCard} flex items-center justify-between gap-3`}>
+                        <div>
+                          <span className={`text-[10px] uppercase font-mono font-bold tracking-wider ${classes.textMuted} block`}>
+                            Unidades a cancelar:
+                          </span>
+                          <span className={`text-[11px] ${classes.textSecondary}`}>
+                            De un total de <strong className="text-amber-500">{currentItem.quantity}</strong> pedidas
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            min={1}
+                            max={currentItem.quantity}
+                            value={cancelQuantity}
+                            onChange={(e) => setCancelQuantity(Math.max(1, Math.min(currentItem.quantity, parseInt(e.target.value, 10) || 1)))}
+                            className={`w-16 p-1.5 text-center font-mono font-bold ${classes.bgCard} border ${classes.borderCard} ${classes.radiusBtn} ${classes.textPrimary} text-xs`}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setCancelQuantity(currentItem.quantity)}
+                            className={`px-2 py-1 text-[10px] font-mono uppercase font-bold ${classes.bgCard} border ${classes.borderCard} ${classes.radiusBtn} ${classes.textMuted} hover:${classes.textPrimary}`}
+                          >
+                            Todas
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  <div>
+                    <label className={`block text-[10px] uppercase font-mono font-bold tracking-wider ${classes.textMuted} mb-1`}>
+                      Motivo de cancelación (Opcional)
+                    </label>
+                    <input
+                      id="input-cancellation-reason"
+                      type="text"
+                      placeholder="Ej. Insumo agotado, cliente cambió de plato..."
+                      value={cancellationReason}
+                      onChange={(e) => setCancellationReason(e.target.value)}
+                      className={`w-full ${classes.inputBg} border ${classes.inputBorder} p-3 ${classes.radiusCard} text-xs ${classes.textPrimary} outline-none focus:border-amber-500 font-mono`}
+                    >
+                    </input>
+                  </div>
+
+                  {/* Option to disable the item if out of stock */}
+                  {currentUser?.role === 'admin' && (
+                    <div className={`${classes.inputBg} border ${classes.borderCard} p-3 ${classes.radiusCard} space-y-2`}>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold text-[11px] text-amber-500 flex items-center gap-1.5">
+                          <CheckCircle className="w-3.5 h-3.5" />
+                          ¿Deshabilitar plato del menú digital (Sin stock)?
+                        </span>
+                        <input
+                          type="checkbox"
+                          id="chk-disable-stock"
+                          checked={!!disableItemOnCancelId}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              const item = selectedOrder.items.find(i => i.id === selectedOrderItemId) || selectedOrder.items[0];
+                              setDisableItemOnCancelId(item?.menuItemId || '');
+                            } else {
+                              setDisableItemOnCancelId('');
+                            }
+                          }}
+                          className="w-4 h-4 rounded text-amber-500 focus:ring-amber-500 cursor-pointer"
+                        />
+                      </div>
+                      <p className={`text-[10px] ${classes.textMuted} leading-normal`}>
+                        Si se agotó en cocina, actívalo para marcarlo como <strong>Agotado</strong> en el menú de los clientes.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Informational banner */}
+                  <div className={`p-3 rounded-xl border ${classes.borderCard} ${classes.inputBg} text-[11px] leading-relaxed`}>
+                    {selectedOrder.items.length > 1 ? (
+                      <p className="text-emerald-400">
+                        ✓ <strong>Comanda continúa activa:</strong> Se eliminará únicamente este plato. Los otros <strong>{selectedOrder.items.length - 1} platos</strong> del pedido continuarán su curso y el total se recalculará automáticamente.
+                      </p>
+                    ) : (
+                      <p className="text-amber-400">
+                        ⚠️ <strong>Único plato en el pedido:</strong> Al cancelar este plato, la comanda completa pasará automáticamente a estado <strong>Cancelado</strong>.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* MODE: Cancel entire order */}
+              {cancelTargetMode === 'order' && (
+                <div className={`space-y-4 text-xs ${classes.textSecondary}`}>
+                  <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300">
+                    <p className="font-bold text-[11px]">
+                      ⚠️ Se cancelarán todos los platos ({selectedOrder.items.length}) del pedido de {selectedOrder.tableName}.
+                    </p>
+                    <p className="text-[10px] mt-1 opacity-90">
+                      El cliente verá reflejado el estado "Cancelado" inmediatamente en su pantalla.
+                    </p>
+                  </div>
+
+                  <div>
+                    <label className={`block text-[10px] uppercase font-mono font-bold tracking-wider ${classes.textMuted} mb-1`}>
+                      Motivo de cancelación (Opcional)
+                    </label>
+                    <input
+                      id="input-cancellation-reason-order"
+                      type="text"
+                      placeholder="Ej. Mesa se retiró, pedido duplicado, error de carga..."
+                      value={cancellationReason}
+                      onChange={(e) => setCancellationReason(e.target.value)}
+                      className={`w-full ${classes.inputBg} border ${classes.inputBorder} p-3 ${classes.radiusCard} text-xs ${classes.textPrimary} outline-none focus:border-amber-500 font-mono`}
+                    />
+                  </div>
+
+                  {currentUser?.role === 'admin' && (
+                    <div className={`${classes.inputBg} border ${classes.borderCard} p-3 ${classes.radiusCard} space-y-2`}>
+                      <div className="flex items-center space-x-1.5 text-amber-500 mb-1">
+                        <CheckCircle className="w-4 h-4 shrink-0" />
+                        <span className="font-semibold text-[11px]">Deshabilitar plato causante (Opcional)</span>
+                      </div>
+                      <select
+                        id="cancellation-item-disabler"
+                        value={disableItemOnCancelId}
+                        onChange={(e) => setDisableItemOnCancelId(e.target.value)}
+                        className={`w-full ${classes.bgCard} border ${classes.borderCard} p-2 ${classes.textPrimary} ${classes.radiusCard} text-xs`}
+                      >
+                        <option value="">-- No deshabilitar ningún plato --</option>
+                        {selectedOrder.items.map(item => (
+                          <option key={item.id} value={item.menuItemId}>
+                            {item.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className={`pt-4 border-t ${classes.borderCard} flex items-center justify-end space-x-2.5`}>
                 <button
                   id="btn-cancel-modal-close"
                   onClick={() => setIsCancelModalOpen(false)}
@@ -2320,13 +2754,26 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 >
                   Regresar
                 </button>
-                <button
-                  id="btn-confirm-cancel-order"
-                  onClick={handleCancelOrder}
-                  className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-rose-600 hover:bg-rose-700 text-white ${classes.radiusBtn} transition cursor-pointer shadow-md`}
-                >
-                  Confirmar Cancelación
-                </button>
+
+                {cancelTargetMode === 'item' ? (
+                  <button
+                    id="btn-confirm-cancel-item"
+                    onClick={handleCancelItemFromOrder}
+                    className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-amber-500 hover:bg-amber-400 text-black ${classes.radiusBtn} transition cursor-pointer shadow-md flex items-center gap-1.5`}
+                  >
+                    <Trash className="w-3.5 h-3.5" />
+                    <span>Cancelar solo este plato</span>
+                  </button>
+                ) : (
+                  <button
+                    id="btn-confirm-cancel-order"
+                    onClick={handleCancelOrder}
+                    className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-rose-600 hover:bg-rose-700 text-white ${classes.radiusBtn} transition cursor-pointer shadow-md flex items-center gap-1.5`}
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    <span>Confirmar Cancelación de Pedido</span>
+                  </button>
+                )}
               </div>
             </motion.div>
           </div>
@@ -2415,31 +2862,49 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
 
               {/* Actions */}
               <div className={`mt-5 pt-4 border-t ${classes.borderCard} flex flex-wrap items-center justify-between gap-2`}>
-                <button
-                  onClick={() =>
-                    printTableBill(
-                      billModalTable.name,
-                      billModalOrders,
-                      activeEstablishment?.name ?? ''
-                    )
-                  }
-                  className={`flex items-center space-x-2 px-4 py-2.5 ${classes.radiusBtn} text-xs font-black uppercase tracking-widest ${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 ${classes.textSecondary} hover:text-amber-500 transition cursor-pointer`}
-                >
-                  <Printer className="w-3.5 h-3.5" />
-                  <span>Imprimir Ticket</span>
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() =>
+                      printTableBill(
+                        billModalTable.name,
+                        billModalOrders,
+                        activeEstablishment?.name ?? ''
+                      )
+                    }
+                    className={`flex items-center space-x-1.5 px-3 py-2 ${classes.radiusBtn} text-xs font-black uppercase tracking-widest ${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 ${classes.textSecondary} hover:text-amber-500 transition cursor-pointer`}
+                    title="Imprimir ticket térmico en impresora o PDF"
+                  >
+                    <Printer className="w-3.5 h-3.5" />
+                    <span>Imprimir</span>
+                  </button>
+
+                  <button
+                    onClick={() =>
+                      downloadTableBillTxt(
+                        billModalTable.name,
+                        billModalOrders,
+                        activeEstablishment?.name ?? ''
+                      )
+                    }
+                    className={`flex items-center space-x-1.5 px-3 py-2 ${classes.radiusBtn} text-xs font-black uppercase tracking-widest ${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 ${classes.textSecondary} hover:text-amber-500 transition cursor-pointer`}
+                    title="Descargar ticket en formato texto .txt"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Descargar .txt</span>
+                  </button>
+                </div>
 
                 <div className="flex items-center gap-2">
                   <button
                     onClick={() => setBillModalTableId(null)}
-                    className={`px-4 py-2.5 text-xs font-black uppercase tracking-widest ${classes.textMuted} ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} transition cursor-pointer`}
+                    className={`px-3 py-2 text-xs font-black uppercase tracking-widest ${classes.textMuted} ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} transition cursor-pointer`}
                   >
                     Cancelar
                   </button>
                   <button
                     id="btn-confirm-close-from-bill"
                     onClick={confirmCloseTableFromModal}
-                    className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-rose-600 hover:bg-rose-700 text-white ${classes.radiusBtn} transition cursor-pointer shadow-md`}
+                    className={`px-4 py-2 text-xs font-black uppercase tracking-widest bg-rose-600 hover:bg-rose-700 text-white ${classes.radiusBtn} transition cursor-pointer shadow-md`}
                   >
                     Cerrar Mesa
                   </button>
@@ -2806,6 +3271,14 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     {formatPrice((cashPreview.initialAmount ?? 0) + cashPreview.totals.totalRevenue)}
                   </span>
                 </div>
+                {cashPreview.openNote && (
+                  <div className={`border-t ${classes.borderCard} pt-2 text-[11px]`}>
+                    <span className={`${classes.textMuted} block text-[9px] uppercase font-bold tracking-wider`}>
+                      Obs. de apertura de turno:
+                    </span>
+                    <span className={`${classes.textSecondary} italic mt-0.5 block`}>"{cashPreview.openNote}"</span>
+                  </div>
+                )}
               </div>
 
               {/* Note input */}
@@ -2927,6 +3400,279 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                   </button>
                 </div>
               </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* MODAL 5: Table Closes History & Ticket Re-print/Download */}
+      <AnimatePresence>
+        {isTableClosesModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 0.5 }}
+              exit={{ opacity: 0 }}
+              onClick={() => {
+                setIsTableClosesModalOpen(false);
+                setSelectedTableCloseReceipt(null);
+              }}
+              className={`absolute inset-0 ${classes.glassOverlay}`}
+            />
+
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} w-full max-w-4xl p-6 relative font-sans shadow-2xl max-h-[90vh] flex flex-col`}
+            >
+              {/* Modal Header */}
+              <div className={`flex items-center justify-between border-b ${classes.borderCard} pb-4 mb-4 shrink-0`}>
+                <div className="flex items-center space-x-3">
+                  <div className="p-2.5 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                    <Receipt className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className={`font-black text-sm uppercase tracking-wider ${classes.textPrimary} flex items-center gap-2`}>
+                      Historial de Cierres de Mesas y Tickets
+                    </h3>
+                    <p className={`text-xs ${classes.textMuted}`}>
+                      Consulta cierres pasados, reimprime comandas o descarga tickets en archivo .txt
+                    </p>
+                  </div>
+                </div>
+                <button
+                  id="btn-close-table-closes-modal"
+                  onClick={() => {
+                    setIsTableClosesModalOpen(false);
+                    setSelectedTableCloseReceipt(null);
+                  }}
+                  className={`p-2 ${classes.radiusBtn} ${classes.textMuted} hover:${classes.textPrimary} ${classes.bgCard} border ${classes.borderCard} transition cursor-pointer`}
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Filters & Stats Header */}
+              <div className="space-y-3 mb-4 shrink-0">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  {/* Search input */}
+                  <div className="relative flex-1 min-w-[240px]">
+                    <Search className={`w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 ${classes.textMuted}`} />
+                    <input
+                      id="input-search-table-closes"
+                      type="text"
+                      value={tableCloseSearchQuery}
+                      onChange={(e) => setTableCloseSearchQuery(e.target.value)}
+                      placeholder="Buscar por mesa, cliente, plato o mozo..."
+                      className={`w-full ${classes.inputBg} border ${classes.inputBorder} pl-9 pr-3 py-2 ${classes.radiusCard} text-xs outline-none focus:border-amber-500 ${classes.textPrimary}`}
+                    />
+                    {tableCloseSearchQuery && (
+                      <button
+                        onClick={() => setTableCloseSearchQuery('')}
+                        className={`absolute right-2.5 top-1/2 -translate-y-1/2 text-xs ${classes.textMuted} hover:${classes.textPrimary}`}
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Date Filter Tabs */}
+                  <div className={`flex items-center space-x-1 p-1 ${classes.inputBg} border ${classes.borderCard} ${classes.radiusBtn}`}>
+                    <button
+                      onClick={() => setTableCloseDateFilter('all')}
+                      className={`px-2.5 py-1 text-[11px] font-bold ${classes.radiusBtn} transition ${
+                        tableCloseDateFilter === 'all'
+                          ? 'bg-amber-500 text-zinc-950 shadow-sm'
+                          : `${classes.textMuted} hover:${classes.textPrimary}`
+                      }`}
+                    >
+                      Todos ({tableCloses.length})
+                    </button>
+                    <button
+                      onClick={() => setTableCloseDateFilter('today')}
+                      className={`px-2.5 py-1 text-[11px] font-bold ${classes.radiusBtn} transition ${
+                        tableCloseDateFilter === 'today'
+                          ? 'bg-amber-500 text-zinc-950 shadow-sm'
+                          : `${classes.textMuted} hover:${classes.textPrimary}`
+                      }`}
+                    >
+                      Hoy
+                    </button>
+                    <button
+                      onClick={() => setTableCloseDateFilter('week')}
+                      className={`px-2.5 py-1 text-[11px] font-bold ${classes.radiusBtn} transition ${
+                        tableCloseDateFilter === 'week'
+                          ? 'bg-amber-500 text-zinc-950 shadow-sm'
+                          : `${classes.textMuted} hover:${classes.textPrimary}`
+                      }`}
+                    >
+                      Últimos 7 días
+                    </button>
+                  </div>
+                </div>
+
+                {/* Summary bar */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                  <div className={`${classes.inputBg} border ${classes.borderCard} p-2.5 ${classes.radiusCard} flex items-center justify-between`}>
+                    <span className={`text-[10px] uppercase font-mono font-bold ${classes.textMuted}`}>Cierres Registrados</span>
+                    <span className={`text-sm font-black font-mono ${classes.textPrimary}`}>{filteredTableCloses.length}</span>
+                  </div>
+                  <div className={`${classes.inputBg} border ${classes.borderCard} p-2.5 ${classes.radiusCard} flex items-center justify-between`}>
+                    <span className={`text-[10px] uppercase font-mono font-bold ${classes.textMuted}`}>Total Facturado</span>
+                    <span className="text-sm font-black font-mono text-amber-500">
+                      {formatPrice(filteredTableCloses.reduce((sum, tc) => sum + tc.totalAmount, 0))}
+                    </span>
+                  </div>
+                  <div className={`col-span-2 sm:col-span-1 ${classes.inputBg} border ${classes.borderCard} p-2.5 ${classes.radiusCard} flex items-center justify-between`}>
+                    <span className={`text-[10px] uppercase font-mono font-bold ${classes.textMuted}`}>Promedio / Mesa</span>
+                    <span className={`text-sm font-black font-mono ${classes.textSecondary}`}>
+                      {filteredTableCloses.length > 0
+                        ? formatPrice(filteredTableCloses.reduce((sum, tc) => sum + tc.totalAmount, 0) / filteredTableCloses.length)
+                        : '$ 0'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* List of Closed Tables */}
+              <div className="flex-1 overflow-y-auto space-y-3 pr-1">
+                {filteredTableCloses.length === 0 ? (
+                  <div className={`py-12 text-center border border-dashed ${classes.borderCard} ${classes.radiusCard} p-6`}>
+                    <Receipt className={`w-8 h-8 mx-auto mb-2 opacity-30 ${classes.textMuted}`} />
+                    <p className={`text-xs ${classes.textMuted}`}>No se encontraron cierres de mesa con los filtros seleccionados.</p>
+                    <p className={`text-[10px] ${classes.textMuted} mt-1`}>
+                      Cuando el personal cierre una mesa desde el panel, el comprobante y el historial aparecerán aquí automáticamente.
+                    </p>
+                  </div>
+                ) : (
+                  filteredTableCloses.map((receipt) => {
+                    const isExpanded = selectedTableCloseReceipt?.id === receipt.id;
+                    return (
+                      <div
+                        id={`receipt-card-${receipt.id}`}
+                        key={receipt.id}
+                        className={`${classes.inputBg} border ${isExpanded ? 'border-amber-500/50' : classes.borderCard} ${classes.radiusCard} p-4 transition`}
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="space-y-1">
+                            <div className="flex items-center space-x-2 flex-wrap gap-y-1">
+                              <h4 className={`font-black text-sm uppercase ${classes.textPrimary}`}>
+                                {receipt.tableName}
+                              </h4>
+                              <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-md bg-zinc-500/15 text-zinc-300 border border-zinc-500/30">
+                                {receipt.orderCount} pedido(s)
+                              </span>
+                              {receipt.closedByName && (
+                                <span className="text-[10px] font-medium px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                                  Cerrado por: {receipt.closedByName}
+                                </span>
+                              )}
+                            </div>
+
+                            <div className={`flex items-center space-x-3 text-[11px] ${classes.textMuted} font-mono flex-wrap`}>
+                              <span>
+                                🕒 {new Date(receipt.closedAt).toLocaleString('es-AR', {
+                                  day: '2-digit',
+                                  month: '2-digit',
+                                  year: 'numeric',
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                })}
+                              </span>
+                              {receipt.dinerNames.length > 0 && (
+                                <span>👤 {receipt.dinerNames.join(', ')}</span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Total & Action Buttons */}
+                          <div className="flex items-center space-x-2 shrink-0">
+                            <div className="text-right mr-2">
+                              <span className={`text-[10px] uppercase font-mono block ${classes.textMuted}`}>Total Cobrado</span>
+                              <span className="text-base font-black font-mono text-amber-500">
+                                {formatPrice(receipt.totalAmount)}
+                              </span>
+                            </div>
+
+                            <button
+                              id={`btn-print-receipt-${receipt.id}`}
+                              onClick={() => printTableCloseReceipt(receipt, activeEstablishment?.name ?? '')}
+                              className={`p-2 ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 ${classes.textSecondary} hover:text-amber-500 transition cursor-pointer`}
+                              title="Reimprimir Ticket Térmico"
+                            >
+                              <Printer className="w-4 h-4" />
+                            </button>
+
+                            <button
+                              id={`btn-download-receipt-txt-${receipt.id}`}
+                              onClick={() => downloadTableCloseReceiptTxt(receipt, activeEstablishment?.name ?? '')}
+                              className={`p-2 ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} hover:border-amber-500 ${classes.textSecondary} hover:text-amber-500 transition cursor-pointer`}
+                              title="Descargar Ticket en archivo .txt"
+                            >
+                              <Download className="w-4 h-4" />
+                            </button>
+
+                            <button
+                              id={`btn-toggle-expand-receipt-${receipt.id}`}
+                              onClick={() => setSelectedTableCloseReceipt(isExpanded ? null : receipt)}
+                              className={`px-2.5 py-2 ${classes.radiusBtn} ${classes.bgCard} border ${classes.borderCard} ${classes.textSecondary} hover:${classes.textPrimary} text-[11px] font-bold transition cursor-pointer`}
+                            >
+                              {isExpanded ? 'Ocultar Detalle' : 'Ver Detalle'}
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Expanded Items Breakdown */}
+                        {isExpanded && (
+                          <div className={`mt-3 pt-3 border-t ${classes.borderCard} space-y-2`}>
+                            <h5 className={`text-[10px] uppercase font-mono font-black ${classes.textMuted} tracking-wider`}>
+                              Detalle de Comandas y Platos Consumidos:
+                            </h5>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                              {receipt.orders.map((order) => {
+                                const sub = order.items.reduce((s, i) => s + i.price * i.quantity, 0);
+                                return (
+                                  <div key={order.id} className={`${classes.bgCard} border ${classes.borderCard} p-2.5 rounded-lg text-xs space-y-1.5`}>
+                                    <div className="flex items-center justify-between text-[10px] font-mono font-bold text-amber-500">
+                                      <span>Pedido #{order.id.slice(-4).toUpperCase()} ({order.dinerName || 'Sin comensal'})</span>
+                                      <span>{formatPrice(sub)}</span>
+                                    </div>
+                                    <div className="space-y-1">
+                                      {order.items.map((it) => (
+                                        <div key={it.id} className="flex justify-between items-baseline text-[11px]">
+                                          <span className={classes.textSecondary}>
+                                            <span className="font-mono font-bold text-amber-500 mr-1">{it.quantity}x</span>
+                                            {it.name}
+                                          </span>
+                                          <span className={`font-mono ${classes.textMuted}`}>{formatPrice(it.price * it.quantity)}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              {/* Modal Footer */}
+              <div className={`mt-4 pt-3 border-t ${classes.borderCard} flex items-center justify-end shrink-0`}>
+                <button
+                  onClick={() => {
+                    setIsTableClosesModalOpen(false);
+                    setSelectedTableCloseReceipt(null);
+                  }}
+                  className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-amber-500 hover:bg-amber-400 text-zinc-950 ${classes.radiusBtn} transition cursor-pointer shadow-md`}
+                >
+                  Cerrar Historial
+                </button>
+              </div>
             </motion.div>
           </div>
         )}

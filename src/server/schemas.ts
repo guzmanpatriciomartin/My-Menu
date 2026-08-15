@@ -80,6 +80,15 @@ export const updateOrderStatusSchema = z
   .strict();
 export type UpdateOrderStatusBody = z.infer<typeof updateOrderStatusSchema>;
 
+export const cancelOrderItemSchema = z
+  .object({
+    orderItemId: nonEmpty,
+    quantity: z.number().int().positive().optional(),
+    cancellationReason: z.string().max(500).optional(),
+  })
+  .strict();
+export type CancelOrderItemBody = z.infer<typeof cancelOrderItemSchema>;
+
 // --- Menu item (admin) ---
 // establishmentId is accepted (the client sends it) but ALWAYS overridden with the
 // session tenant in the endpoint; it is never trusted for authorization.
@@ -116,6 +125,9 @@ export const saveTableSchema = z
     name: nonEmpty.max(200),
     active: z.boolean().default(true),
     qrUrl: z.string().max(2000).optional(),
+    isOccupied: z.boolean().optional(),
+    activeOrdersCount: z.number().optional(),
+    lastClosedAt: z.string().optional(),
   })
   .strict();
 export type SaveTableBody = z.infer<typeof saveTableSchema>;

@@ -10,6 +10,7 @@ import {
   ProductLine,
   TableLine,
   CashCloseTotals,
+  TableCloseReceipt,
 } from '../types';
 
 export const initialEstablishments: Establishment[] = [
@@ -1008,6 +1009,7 @@ export function generateSeedCashRegisters(): CashRegisterSession[] {
       openedByEmail: 'carolina@mimenu.com',
       openedByName: 'Carolina (Admin)',
       initialAmount: 15000,
+      openNote: 'Fondo inicial de cambio verificado en billetes chicos',
     },
     {
       id: 'cafe-speakeasy',
@@ -1017,7 +1019,40 @@ export function generateSeedCashRegisters(): CashRegisterSession[] {
       openedByEmail: 'sofia@mimenu.com',
       openedByName: 'Sofía (Admin)',
       initialAmount: 10000,
+      openNote: 'Apertura de turno tarde con cambio',
     },
   ];
+}
+
+export function generateSeedTableCloses(): TableCloseReceipt[] {
+  const seedOrders = generateSeedOrders();
+  const deliveredPalermo = seedOrders.filter(
+    (o) => o.establishmentId === 'bodegon-palermo' && o.status === 'Entregado' && o.tableId === 'tbl-palermo-1'
+  );
+
+  const closes: TableCloseReceipt[] = [];
+
+  if (deliveredPalermo.length > 0) {
+    const ordersChunk = deliveredPalermo.slice(0, 2);
+    const totalAmount = ordersChunk.reduce((sum, o) => sum + o.items.reduce((s, i) => s + i.price * i.quantity, 0), 0);
+    const dinerNames = [...new Set(ordersChunk.map((o) => o.dinerName).filter(Boolean) as string[])];
+
+    closes.push({
+      id: 'tclose-palermo-demo-1',
+      establishmentId: 'bodegon-palermo',
+      tableId: 'tbl-palermo-1',
+      tableName: 'Mesa 1 (Salón Principal)',
+      closedAt: getVenueIsoDate(1, 23, 15),
+      closedByName: 'Carolina (Admin)',
+      closedByEmail: 'carolina@mimenu.com',
+      openedAt: ordersChunk[0]?.createdAt || getVenueIsoDate(1, 21, 0),
+      orders: ordersChunk,
+      totalAmount,
+      orderCount: ordersChunk.length,
+      dinerNames,
+    });
+  }
+
+  return closes;
 }
 
