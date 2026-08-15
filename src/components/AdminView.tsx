@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+﻿import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Plus, 
@@ -78,7 +78,7 @@ interface AdminViewProps {
 type AuthMe = Pick<UserSession, 'email' | 'role' | 'establishmentId'>;
 
 export default function AdminView({ onBackToLauncher }: AdminViewProps) {
-  const { classes, isDark } = useTheme();
+  const { classes, isDark, primaryColorConfig } = useTheme();
 
   // Authentication state
   const [currentUser, setCurrentUser] = useState<AuthMe | null>(null);
@@ -1065,7 +1065,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       <div className={`min-h-screen ${classes.bgApp} flex flex-col items-center justify-center p-6 selection:bg-amber-500 selection:text-zinc-950 font-sans transition-colors duration-300`}>
         <div id="login-container" className={`max-w-md w-full ${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-8 relative overflow-hidden shadow-2xl`}>
           
-          <div className="absolute top-0 left-0 right-0 h-1 bg-amber-500"></div>
+          <div className={`absolute top-0 left-0 right-0 h-1 ${primaryColorConfig.accentBg}`}></div>
 
           <div className="text-center mb-6">
             <h1 className={`text-xl font-black ${classes.textPrimary} tracking-widest flex items-center justify-center space-x-2.5 uppercase`}>
@@ -1148,7 +1148,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               id="btn-login"
               type="submit"
               disabled={isLoggingIn}
-              className={`w-full py-4 ${classes.radiusBtn} font-black text-xs text-zinc-950 bg-amber-500 hover:bg-amber-400 uppercase tracking-[0.2em] cursor-pointer transition-all disabled:opacity-50 flex items-center justify-center space-x-2 shadow-lg shadow-amber-500/20`}
+              className={`w-full py-4 ${classes.radiusBtn} ${classes.primaryBtn} font-black text-xs uppercase tracking-[0.2em] cursor-pointer transition-all disabled:opacity-50 flex items-center justify-center space-x-2`}
             >
               {isLoggingIn ? (
                 <>
@@ -1281,8 +1281,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
             onClick={() => setActiveTab('pedidos')}
             className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center justify-between transition min-w-[124px] md:w-full shrink-0 border ${
               activeTab === 'pedidos' 
-                ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold shadow-md' 
-                : `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
+                ? `${classes.primaryBtn} border-current shadow-md`: `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
             }`}
           >
             <span className="flex items-center">
@@ -1311,8 +1310,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
             onClick={() => setActiveTab('diseño_mesas')}
             className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center transition min-w-[124px] md:w-full shrink-0 border ${
               activeTab === 'diseño_mesas'
-                ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold shadow-md'
-                : `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
+                ? `${classes.primaryBtn} border-current shadow-md`: `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
             }`}
           >
             <Users className="w-4 h-4 mr-2.5" />
@@ -1324,8 +1322,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
             onClick={() => setActiveTab('caja')}
             className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center transition min-w-[124px] md:w-full shrink-0 border ${
               activeTab === 'caja'
-                ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold shadow-md'
-                : `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
+                ? `${classes.primaryBtn} border-current shadow-md`: `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
             }`}
           >
             <Wallet className="w-4 h-4 mr-2.5" />
@@ -1340,8 +1337,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 onClick={() => setActiveTab('menu_items')}
                 className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center transition min-w-[124px] md:w-full shrink-0 border ${
                   activeTab === 'menu_items'
-                    ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold shadow-md'
-                    : `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
+                    ? `${classes.primaryBtn} border-current shadow-md`: `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
                 }`}
               >
                 <Utensils className="w-4 h-4 mr-2.5" />
@@ -1353,8 +1349,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 onClick={() => setActiveTab('metricas')}
                 className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center transition min-w-[124px] md:w-full shrink-0 border ${
                   activeTab === 'metricas'
-                    ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold shadow-md'
-                    : `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
+                    ? `${classes.primaryBtn} border-current shadow-md`: `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
                 }`}
               >
                 <BarChart3 className="w-4 h-4 mr-2.5" />
@@ -1374,8 +1369,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
             onClick={() => setActiveTab('historial')}
             className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center transition min-w-[124px] md:w-full shrink-0 border ${
               activeTab === 'historial' 
-                ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold shadow-md' 
-                : `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
+                ? `${classes.primaryBtn} border-current shadow-md`: `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
             }`}
           >
             <TrendingUp className="w-4 h-4 mr-2.5" />
@@ -1420,7 +1414,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       onClick={() => setOrdersView('monitor')}
                       className={`px-3 py-1.5 ${classes.radiusBtn} text-[10px] font-black uppercase tracking-widest transition flex items-center gap-1.5 ${
                         ordersView === 'monitor'
-                          ? 'bg-amber-500 text-zinc-950 shadow-sm'
+                          ? `${classes.primaryBtn} shadow-sm`
                           : `${classes.textMuted} hover:${classes.textPrimary}`
                       }`}
                       title="Monitor de comandas en tiempo real"
@@ -1433,7 +1427,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       onClick={() => setOrdersView('tabla')}
                       className={`px-3 py-1.5 ${classes.radiusBtn} text-[10px] font-black uppercase tracking-widest transition flex items-center gap-1.5 ${
                         ordersView === 'tabla'
-                          ? 'bg-amber-500 text-zinc-950 shadow-sm'
+                          ? `${classes.primaryBtn} shadow-sm`
                           : `${classes.textMuted} hover:${classes.textPrimary}`
                       }`}
                       title="Base de datos de pedidos"
@@ -1485,7 +1479,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                         <button
                           id={`btn-attend-call-${call.id}`}
                           onClick={() => handleAttendCall(call.id)}
-                          className="px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider bg-amber-500 text-zinc-950 hover:bg-amber-400 transition cursor-pointer shrink-0 shadow"
+                          className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-wider ${classes.primaryBtn} transition cursor-pointer shrink-0`}
                         >
                           Atender
                         </button>
@@ -1679,7 +1673,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                         setEditingTable({ name: '', active: true });
                         setIsTableModalOpen(true);
                       }}
-                      className={`px-4.5 py-3 ${classes.radiusBtn} text-xs font-black text-zinc-950 bg-amber-500 hover:bg-amber-400 transition flex items-center space-x-2 cursor-pointer uppercase tracking-widest shadow-md`}
+                      className={`px-4.5 py-3 ${classes.radiusBtn} text-xs ${classes.primaryBtn} transition flex items-center space-x-2 cursor-pointer uppercase tracking-widest`}
                     >
                       <Plus className="w-4 h-4" />
                       <span>Crear Nueva Mesa</span>
@@ -1848,7 +1842,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       setIsItemModalOpen(true);
                     }}
                     disabled={categories.length === 0}
-                    className={`px-4.5 py-3 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-zinc-950 text-xs font-black ${classes.radiusBtn} transition flex items-center space-x-2 cursor-pointer uppercase tracking-widest shadow-md`}
+                    className={`px-4.5 py-3 ${classes.primaryBtn} disabled:opacity-50 text-xs font-black ${classes.radiusBtn} transition flex items-center space-x-2 cursor-pointer uppercase tracking-widest shadow-md`}
                   >
                     <Plus className="w-4 h-4" />
                     <span>Nuevo Item</span>
@@ -1876,8 +1870,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     onClick={() => setMenuCatFilter('all')}
                     className={`px-3.5 py-2 ${classes.radiusBtn} text-[10px] font-black uppercase tracking-wider transition-all border ${
                       menuCatFilter === 'all' 
-                        ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold' 
-                        : `${classes.bgCard} ${classes.textMuted} ${classes.borderCard} hover:${classes.textPrimary}`
+                        ? `${classes.primaryBtn} border-current`: `${classes.bgCard} ${classes.textMuted} ${classes.borderCard} hover:${classes.textPrimary}`
                     }`}
                   >
                     Todos
@@ -1889,8 +1882,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       onClick={() => setMenuCatFilter(cat.id)}
                       className={`px-3.5 py-2 ${classes.radiusBtn} text-[10px] font-black uppercase tracking-wider transition-all border ${
                         menuCatFilter === cat.id 
-                          ? 'bg-amber-500 text-zinc-950 border-amber-500 font-bold' 
-                          : `${classes.bgCard} ${classes.textMuted} ${classes.borderCard} hover:${classes.textPrimary}`
+                          ? `${classes.primaryBtn} border-current`: `${classes.bgCard} ${classes.textMuted} ${classes.borderCard} hover:${classes.textPrimary}`
                       }`}
                     >
                       {cat.name}
@@ -2132,7 +2124,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                   </div>
                   <button
                     onClick={() => setActiveTab('pedidos')}
-                    className={`px-3 py-1.5 ${classes.radiusBtn} bg-amber-500 text-zinc-950 text-[10px] font-black uppercase tracking-wider hover:bg-amber-400 transition cursor-pointer`}
+                    className={`px-3 py-1.5 ${classes.radiusBtn} ${classes.primaryBtn} text-[10px] font-black uppercase tracking-wider transition cursor-pointer`}
                   >
                     Ver Comandas
                   </button>
@@ -2234,7 +2226,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       className={`px-5 py-3 ${classes.radiusBtn} text-xs font-black uppercase tracking-widest transition flex items-center space-x-2 ${
                         !cashPreview || cashPreview.totals.orderCount === 0
                           ? `${classes.inputBg} ${classes.textMuted} cursor-not-allowed border ${classes.borderCard}`
-                          : 'bg-amber-500 hover:bg-amber-400 text-zinc-950 cursor-pointer shadow-md'
+                          : `${classes.primaryBtn} cursor-pointer`
                       }`}
                     >
                       <Wallet className="w-4 h-4" />
@@ -2549,7 +2541,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                   }}
                   className={`py-2 px-3 text-xs font-black uppercase tracking-wider rounded-lg transition flex items-center justify-center gap-1.5 cursor-pointer ${
                     cancelTargetMode === 'item'
-                      ? 'bg-amber-500 text-black shadow-sm'
+                      ? `${classes.primaryBtn} shadow-sm`
                       : `${classes.textMuted} hover:${classes.textPrimary}`
                   }`}
                 >
@@ -2759,7 +2751,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                   <button
                     id="btn-confirm-cancel-item"
                     onClick={handleCancelItemFromOrder}
-                    className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-amber-500 hover:bg-amber-400 text-black ${classes.radiusBtn} transition cursor-pointer shadow-md flex items-center gap-1.5`}
+                    className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest ${classes.primaryBtn} ${classes.radiusBtn} transition cursor-pointer shadow-md flex items-center gap-1.5`}
                   >
                     <Trash className="w-3.5 h-3.5" />
                     <span>Cancelar solo este plato</span>
@@ -2982,7 +2974,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                   <button
                     id="btn-category-modal-submit"
                     type="submit"
-                    className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-amber-500 text-zinc-950 hover:bg-amber-400 ${classes.radiusBtn} transition cursor-pointer shadow-md`}
+                    className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest ${classes.primaryBtn} ${classes.radiusBtn} transition cursor-pointer`}
                   >
                     Guardar Categoría
                   </button>
@@ -3123,7 +3115,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                   <button
                     id="btn-item-modal-submit"
                     type="submit"
-                    className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-amber-500 text-zinc-950 hover:bg-amber-400 ${classes.radiusBtn} transition cursor-pointer shadow-md`}
+                    className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest ${classes.primaryBtn} ${classes.radiusBtn} transition cursor-pointer`}
                   >
                     Guardar Ítem
                   </button>
@@ -3317,7 +3309,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                   type="button"
                   onClick={handleCashClose}
                   disabled={isClosingCash || cashPreview.totals.orderCount === 0}
-                  className={`flex-1 px-4 py-3 ${classes.radiusBtn} bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-black uppercase tracking-widest cursor-pointer disabled:opacity-60 disabled:cursor-wait`}
+                  className={`flex-1 px-4 py-3 ${classes.radiusBtn} ${classes.primaryBtn} text-xs font-black uppercase tracking-widest cursor-pointer disabled:opacity-60 disabled:cursor-wait`}
                 >
                   {isClosingCash ? 'Cerrando…' : 'Confirmar Cierre'}
                 </button>
@@ -3394,7 +3386,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     id="btn-table-modal-submit"
                     type="submit"
                     disabled={isSavingTable}
-                    className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-amber-500 text-zinc-950 hover:bg-amber-400 ${classes.radiusBtn} transition cursor-pointer shadow-md disabled:opacity-60 disabled:cursor-wait`}
+                    className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest ${classes.primaryBtn} ${classes.radiusBtn} transition cursor-pointer disabled:opacity-60 disabled:cursor-wait`}
                   >
                     {isSavingTable ? 'Guardando…' : 'Guardar Mesa'}
                   </button>
@@ -3483,7 +3475,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       onClick={() => setTableCloseDateFilter('all')}
                       className={`px-2.5 py-1 text-[11px] font-bold ${classes.radiusBtn} transition ${
                         tableCloseDateFilter === 'all'
-                          ? 'bg-amber-500 text-zinc-950 shadow-sm'
+                          ? `${classes.primaryBtn} shadow-sm`
                           : `${classes.textMuted} hover:${classes.textPrimary}`
                       }`}
                     >
@@ -3493,7 +3485,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       onClick={() => setTableCloseDateFilter('today')}
                       className={`px-2.5 py-1 text-[11px] font-bold ${classes.radiusBtn} transition ${
                         tableCloseDateFilter === 'today'
-                          ? 'bg-amber-500 text-zinc-950 shadow-sm'
+                          ? `${classes.primaryBtn} shadow-sm`
                           : `${classes.textMuted} hover:${classes.textPrimary}`
                       }`}
                     >
@@ -3503,7 +3495,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                       onClick={() => setTableCloseDateFilter('week')}
                       className={`px-2.5 py-1 text-[11px] font-bold ${classes.radiusBtn} transition ${
                         tableCloseDateFilter === 'week'
-                          ? 'bg-amber-500 text-zinc-950 shadow-sm'
+                          ? `${classes.primaryBtn} shadow-sm`
                           : `${classes.textMuted} hover:${classes.textPrimary}`
                       }`}
                     >
@@ -3668,7 +3660,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     setIsTableClosesModalOpen(false);
                     setSelectedTableCloseReceipt(null);
                   }}
-                  className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest bg-amber-500 hover:bg-amber-400 text-zinc-950 ${classes.radiusBtn} transition cursor-pointer shadow-md`}
+                  className={`px-5 py-2.5 text-xs font-black uppercase tracking-widest ${classes.primaryBtn} ${classes.radiusBtn} transition cursor-pointer`}
                 >
                   Cerrar Historial
                 </button>
@@ -3681,3 +3673,6 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     </div>
   );
 }
+
+
+
