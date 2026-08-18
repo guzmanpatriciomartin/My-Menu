@@ -10,16 +10,15 @@ import {
   AlertTriangle,
   XCircle,
   ShoppingBag,
-  DollarSign,
   X,
   ChevronLeft,
   ChevronRight,
   Calendar,
   RotateCcw,
-  Receipt,
   Tag,
   User,
-  MapPin
+  MapPin,
+  DollarSign
 } from 'lucide-react';
 import { Order, OrderStatus, Table, UserRole } from '../types';
 import { useTheme } from '../theme/ThemeContext';
@@ -213,26 +212,6 @@ export default function OrdersTable({
       });
   }, [orders, searchQuery, statusFilter, tableFilter, paymentFilter, dateFilter, sortBy]);
 
-  // Aggregate Metrics over the filtered list
-  const metrics = useMemo(() => {
-    const totalCount = filteredOrders.length;
-    const nonCancelled = filteredOrders.filter((o) => o.status !== 'Cancelado');
-    const totalRevenue = nonCancelled.reduce((sum, o) => sum + getOrderTotal(o), 0);
-    const avgTicket = nonCancelled.length > 0 ? Math.round(totalRevenue / nonCancelled.length) : 0;
-    const deliveredCount = filteredOrders.filter((o) => o.status === 'Entregado').length;
-    const cancelledCount = filteredOrders.filter((o) => o.status === 'Cancelado').length;
-    const paidCount = filteredOrders.filter((o) => o.paymentStatus === 'paid').length;
-
-    return {
-      totalCount,
-      totalRevenue,
-      avgTicket,
-      deliveredCount,
-      cancelledCount,
-      paidCount
-    };
-  }, [filteredOrders]);
-
   // Paginated subset
   const totalPages = Math.max(1, Math.ceil(filteredOrders.length / pageSize));
   const paginatedOrders = useMemo(() => {
@@ -290,69 +269,6 @@ export default function OrdersTable({
 
   return (
     <div className="space-y-4">
-      {/* Metrics Summary Strip */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-        <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-3.5 space-y-1`}>
-          <span className={`text-[10px] font-black uppercase tracking-wider ${classes.textMuted} flex items-center gap-1.5`}>
-            <ShoppingBag className="w-3.5 h-3.5 text-amber-500" />
-            Pedidos
-          </span>
-          <p className={`text-lg font-black font-mono ${classes.textPrimary}`}>
-            {metrics.totalCount}
-          </p>
-        </div>
-
-        <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-3.5 space-y-1`}>
-          <span className={`text-[10px] font-black uppercase tracking-wider ${classes.textMuted} flex items-center gap-1.5`}>
-            <DollarSign className="w-3.5 h-3.5 text-emerald-500" />
-            Facturación
-          </span>
-          <p className="text-lg font-black font-mono text-emerald-400">
-            {formatPrice(metrics.totalRevenue)}
-          </p>
-        </div>
-
-        <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-3.5 space-y-1`}>
-          <span className={`text-[10px] font-black uppercase tracking-wider ${classes.textMuted} flex items-center gap-1.5`}>
-            <Receipt className="w-3.5 h-3.5 text-blue-500" />
-            Ticket Promedio
-          </span>
-          <p className={`text-lg font-black font-mono ${classes.textPrimary}`}>
-            {formatPrice(metrics.avgTicket)}
-          </p>
-        </div>
-
-        <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-3.5 space-y-1`}>
-          <span className={`text-[10px] font-black uppercase tracking-wider ${classes.textMuted} flex items-center gap-1.5`}>
-            <CheckCircle className="w-3.5 h-3.5 text-emerald-400" />
-            Entregados
-          </span>
-          <p className="text-lg font-black font-mono text-emerald-400">
-            {metrics.deliveredCount}
-          </p>
-        </div>
-
-        <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-3.5 space-y-1`}>
-          <span className={`text-[10px] font-black uppercase tracking-wider ${classes.textMuted} flex items-center gap-1.5`}>
-            <DollarSign className="w-3.5 h-3.5 text-emerald-500" />
-            Cobrados
-          </span>
-          <p className={`text-lg font-black font-mono ${classes.textPrimary}`}>
-            {metrics.paidCount}
-          </p>
-        </div>
-
-        <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-3.5 space-y-1`}>
-          <span className={`text-[10px] font-black uppercase tracking-wider ${classes.textMuted} flex items-center gap-1.5`}>
-            <XCircle className="w-3.5 h-3.5 text-rose-500" />
-            Cancelados
-          </span>
-          <p className="text-lg font-black font-mono text-rose-400">
-            {metrics.cancelledCount}
-          </p>
-        </div>
-      </div>
-
       {/* Control Bar: Search & Filters */}
       <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-4 space-y-3`}>
         <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">

@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Plus, 
@@ -60,6 +60,7 @@ import { useTheme } from '../theme/ThemeContext';
 import ThemeTriggerButton from './ThemeTriggerButton';
 import MetricsDashboard from './MetricsDashboard';
 import OrdersTable from './OrdersTable';
+import { TablePOS } from './TablePOS';
 import {
   printKitchenTicket,
   printTableBill,
@@ -101,11 +102,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   // Active states
   const [loading, setLoading] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(true);
-  const [activeTab, setActiveTab] = useState<'diseño_mesas' | 'pedidos' | 'menu_items' | 'historial' | 'caja' | 'metricas'>('pedidos');
-
-  // The Pedidos tab has two lenses over the same data: the live kitchen monitor
-  // (cards) and the queryable orders database (table).
-  const [ordersView, setOrdersView] = useState<'monitor' | 'tabla'>('monitor');
+  const [activeTab, setActiveTab] = useState<'monitor' | 'pos' | 'pedidos' | 'diseño_mesas' | 'caja' | 'menu_items' | 'metricas' | 'historial'>('monitor');
 
   // Cash close & open (ADR-005). Preview is what the shift has pending right now; closes is the
   // history. Both are available to waiters — closing the register is shift work.
@@ -189,7 +186,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       const me: AuthMe = await res.json();
       setCurrentUser(me);
       setActiveEstId(me.establishmentId);
-      if (me.role === 'waiter') setActiveTab('pedidos'); // Waiter only accesses orders
+      if (me.role === 'waiter') setActiveTab('monitor'); // Waiter starts on monitor
     } catch (err) {
       console.error('Login failed', err);
       setLoginError('No se pudo conectar con el servidor.');
@@ -222,7 +219,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
           const me: AuthMe = await res.json();
           setCurrentUser(me);
           setActiveEstId(me.establishmentId);
-          if (me.role === 'waiter') setActiveTab('pedidos');
+          if (me.role === 'waiter') setActiveTab('monitor');
         }
       } catch (err) {
         // Not authenticated — the login screen will render.
@@ -1277,16 +1274,16 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
         {/* Left Side: Layout Navigation rail */}
         <aside className={`w-full md:w-56 shrink-0 flex flex-row md:flex-col gap-1.5 overflow-x-auto scrollbar-none pb-2 md:pb-0 border-b md:border-b-0 md:border-r ${classes.borderCard} pr-0 md:pr-4`}>
           <button
-            id="tab-btn-pedidos"
-            onClick={() => setActiveTab('pedidos')}
+            id="tab-btn-monitor"
+            onClick={() => setActiveTab('monitor')}
             className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center justify-between transition min-w-[124px] md:w-full shrink-0 border ${
-              activeTab === 'pedidos' 
+              activeTab === 'monitor' 
                 ? `${classes.primaryBtn} border-current shadow-md`: `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
             }`}
           >
             <span className="flex items-center">
               <Bell className="w-4 h-4 mr-2.5" />
-              Monitor Pedidos
+              Monitor Cocina
             </span>
             <div className="flex items-center space-x-1 shrink-0">
               {pendingCalls.length > 0 && (
@@ -1300,6 +1297,32 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 </span>
               )}
             </div>
+          </button>
+
+          <button
+            id="tab-btn-pos"
+            onClick={() => setActiveTab('pos')}
+            className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center transition min-w-[124px] md:w-full shrink-0 border ${
+              activeTab === 'pos' 
+                ? `${classes.primaryBtn} border-current shadow-md`: `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
+            }`}
+          >
+            <Utensils className="w-4 h-4 mr-2.5 text-amber-500" />
+            POS Mesas
+          </button>
+
+          <button
+            id="tab-btn-pedidos"
+            onClick={() => setActiveTab('pedidos')}
+            className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center justify-between transition min-w-[124px] md:w-full shrink-0 border ${
+              activeTab === 'pedidos' 
+                ? `${classes.primaryBtn} border-current shadow-md`: `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
+            }`}
+          >
+            <span className="flex items-center">
+              <ClipboardList className="w-4 h-4 mr-2.5" />
+              Pedidos
+            </span>
           </button>
 
           {/* Mesas & QRs is available to waiters too: closing a table and printing a QR
@@ -1389,54 +1412,22 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
         {/* Right Side: Tab Panel Content Container */}
         <main className="flex-1 min-w-0">
           
-          {/* TAB 1: Real-time orders monitor */}
-          {activeTab === 'pedidos' && (
+          {/* TAB: Real-time orders monitor */}
+          {activeTab === 'monitor' && (
             <div className="space-y-6">
               
-              {/* Header metrics card */}
+              {/* Header card */}
               <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 flex flex-wrap items-center justify-between gap-4`}>
                 <div className="space-y-1 my-0.5">
                   <h2 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>
-                    {ordersView === 'monitor' ? 'Monitor de Pedidos Activos' : 'Base de Datos de Pedidos'}
+                    Monitor de Cocina & Salón
                   </h2>
                   <p className={`text-xs ${classes.textMuted} font-medium`}>
-                    {ordersView === 'monitor'
-                      ? 'Atención de comandas en tiempo real. Utiliza los controles de avance y cancelación.'
-                      : 'Navega, busca y filtra el histórico completo de pedidos. Haz clic en una fila para ver el detalle.'}
+                    Atención de comandas en tiempo real. Utiliza los controles de avance y cancelación.
                   </p>
                 </div>
 
                 <div className="flex items-center gap-3">
-                  {/* Lens switch: live monitor vs queryable table */}
-                  <div className={`flex items-center gap-1 ${classes.inputBg} p-1 border ${classes.borderCard} ${classes.radiusBtn}`}>
-                    <button
-                      id="btn-orders-view-monitor"
-                      onClick={() => setOrdersView('monitor')}
-                      className={`px-3 py-1.5 ${classes.radiusBtn} text-[10px] font-black uppercase tracking-widest transition flex items-center gap-1.5 ${
-                        ordersView === 'monitor'
-                          ? `${classes.primaryBtn} shadow-sm`
-                          : `${classes.textMuted} hover:${classes.textPrimary}`
-                      }`}
-                      title="Monitor de comandas en tiempo real"
-                    >
-                      <LayoutGrid className="w-3 h-3" />
-                      Monitor
-                    </button>
-                    <button
-                      id="btn-orders-view-tabla"
-                      onClick={() => setOrdersView('tabla')}
-                      className={`px-3 py-1.5 ${classes.radiusBtn} text-[10px] font-black uppercase tracking-widest transition flex items-center gap-1.5 ${
-                        ordersView === 'tabla'
-                          ? `${classes.primaryBtn} shadow-sm`
-                          : `${classes.textMuted} hover:${classes.textPrimary}`
-                      }`}
-                      title="Base de datos de pedidos"
-                    >
-                      <Database className="w-3 h-3" />
-                      Tabla
-                    </button>
-                  </div>
-
                   <div className={`flex items-center gap-2 ${classes.inputBg} px-4 py-2 border ${classes.borderCard} ${classes.radiusCard} font-mono`}>
                     <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
                     <span className="text-[10px] font-black text-emerald-400 uppercase tracking-widest">En línea (SSE)</span>
@@ -1490,7 +1481,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               )}
 
               {/* Grid of active orders arranged nicely */}
-              {ordersView === 'monitor' && (activeOrdersList.length === 0 ? (
+              {activeOrdersList.length === 0 ? (
                 <div className={`text-center py-24 ${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-6`}>
                   <Bell className={`w-10 h-10 ${classes.textMuted} mx-auto mb-4`} />
                   <h3 className={`text-xs font-black uppercase tracking-wider ${classes.textPrimary} mb-1.5`}>Tranquilidad absoluta</h3>
@@ -1624,17 +1615,44 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     );
                   })}
                 </div>
-              ))}
-
-              {/* Queryable orders database over the full tenant history */}
-              {ordersView === 'tabla' && (
-                <OrdersTable
-                  orders={orders}
-                  tables={tables}
-                  role={currentUser.role}
-                  formatPrice={formatPrice}
-                />
               )}
+            </div>
+          )}
+
+          {/* TAB: POS para Mesas */}
+          {activeTab === 'pos' && (
+            <TablePOS
+              establishmentId={activeEstId}
+              tables={tables}
+              categories={categories}
+              menuItems={menuItems}
+              orders={orders}
+              formatPrice={formatPrice}
+              onOrderCreated={() => fetchDbState()}
+              onOpenTableBill={(tId) => setBillModalTableId(tId)}
+            />
+          )}
+
+          {/* TAB: Orders database (Tabla) */}
+          {activeTab === 'pedidos' && (
+            <div className="space-y-6">
+              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 flex flex-wrap items-center justify-between gap-4`}>
+                <div className="space-y-1 my-0.5">
+                  <h2 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>
+                    Registro de Pedidos
+                  </h2>
+                  <p className={`text-xs ${classes.textMuted} font-medium`}>
+                    Navega, busca y filtra el histórico completo de pedidos. Haz clic en una fila para ver el detalle.
+                  </p>
+                </div>
+              </div>
+
+              <OrdersTable
+                orders={orders}
+                tables={tables}
+                role={currentUser.role}
+                formatPrice={formatPrice}
+              />
             </div>
           )}
 
@@ -2123,7 +2141,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     </div>
                   </div>
                   <button
-                    onClick={() => setActiveTab('pedidos')}
+                    onClick={() => setActiveTab('monitor')}
                     className={`px-3 py-1.5 ${classes.radiusBtn} ${classes.primaryBtn} text-[10px] font-black uppercase tracking-wider transition cursor-pointer`}
                   >
                     Ver Comandas
