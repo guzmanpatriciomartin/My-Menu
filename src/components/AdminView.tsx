@@ -1066,7 +1066,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
 
           <div className="text-center mb-6">
             <h1 className={`text-xl font-black ${classes.textPrimary} tracking-widest flex items-center justify-center space-x-2.5 uppercase`}>
-              <ClipboardList className="w-5 h-5 text-amber-500" />
+              <ClipboardList className={`w-5 h-5 ${primaryColorConfig.textAccent}`} />
               <span>Mi Menu · Gestión</span>
             </h1>
             <p className={`text-[10px] font-mono tracking-wider uppercase ${classes.textMuted} mt-2`}>
@@ -1213,7 +1213,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
         <div className="max-w-7xl mx-auto px-4 md:px-6 py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           
           <div className="flex items-center space-x-3">
-            <ClipboardList className="w-5 h-5 text-amber-500" />
+            <ClipboardList className={`w-5 h-5 ${primaryColorConfig.textAccent}`} />
             <div>
               <h1 className={`text-sm font-black tracking-widest ${classes.textPrimary} uppercase flex items-center`}>
                 Mi Menú · Panel
@@ -1227,7 +1227,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
           {/* Active establishment — fixed to the authenticated tenant, not switchable (RF-A11) */}
           <div className="flex items-center gap-2">
             <span className={`text-[10px] ${classes.textMuted} font-mono uppercase ${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} py-1.5 px-3.5 flex items-center tracking-wider`}>
-              <MapPin className="w-3.5 h-3.5 mr-1.5 text-amber-500" />
+              <MapPin className={`w-3.5 h-3.5 mr-1.5 ${primaryColorConfig.textAccent}`} />
               Establecimiento Activo:
             </span>
             <span
@@ -1248,7 +1248,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               onClick={() => setSoundEnabled(prev => !prev)}
               className={`p-2 ${classes.radiusBtn} border flex items-center justify-center transition-all ${
                 soundEnabled 
-                  ? `${classes.bgCard} border-amber-500 text-amber-500` 
+                  ? `${classes.bgCard} ${primaryColorConfig.accentBorder} ${primaryColorConfig.textAccent}` 
                   : `${classes.bgCard} ${classes.borderCard} ${classes.textMuted}`
               }`}
               title={soundEnabled ? 'Silenciar notificaciones' : 'Activar sonido de pedidos'}
@@ -1282,12 +1282,12 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
             }`}
           >
             <span className="flex items-center">
-              <Bell className="w-4 h-4 mr-2.5" />
+              <Bell className={`w-4 h-4 mr-2.5 ${activeTab === 'monitor' ? 'text-inherit' : primaryColorConfig.textAccent}`} />
               Monitor Cocina
             </span>
             <div className="flex items-center space-x-1 shrink-0">
               {pendingCalls.length > 0 && (
-                <span id="pending-calls-counter" className="text-[9px] font-black bg-amber-500 text-zinc-950 border border-amber-400 px-1.5 py-0.5 rounded-full font-mono animate-pulse shrink-0 flex items-center gap-0.5" title="Llamados de mesa pendientes">
+                <span id="pending-calls-counter" className={`text-[9px] font-black ${primaryColorConfig.accentBg} text-zinc-950 border ${primaryColorConfig.accentBorder} px-1.5 py-0.5 rounded-full font-mono animate-pulse shrink-0 flex items-center gap-0.5`} title="Llamados de mesa pendientes">
                   🔔 {pendingCalls.length}
                 </span>
               )}
@@ -1307,7 +1307,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 ? `${classes.primaryBtn} border-current shadow-md`: `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
             }`}
           >
-            <Utensils className="w-4 h-4 mr-2.5 text-amber-500" />
+            <Utensils className={`w-4 h-4 mr-2.5 ${activeTab === 'pos' ? 'text-inherit' : primaryColorConfig.textAccent}`} />
             POS Mesas
           </button>
 
@@ -1320,7 +1320,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
             }`}
           >
             <span className="flex items-center">
-              <ClipboardList className="w-4 h-4 mr-2.5" />
+              <ClipboardList className={`w-4 h-4 mr-2.5 ${activeTab === 'pedidos' ? 'text-inherit' : primaryColorConfig.textAccent}`} />
               Pedidos
             </span>
           </button>
@@ -1336,7 +1336,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 ? `${classes.primaryBtn} border-current shadow-md`: `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
             }`}
           >
-            <Users className="w-4 h-4 mr-2.5" />
+            <Users className={`w-4 h-4 mr-2.5 ${activeTab === 'diseño_mesas' ? 'text-inherit' : primaryColorConfig.textAccent}`} />
             Mesas & QRs
           </button>
 
@@ -1348,7 +1348,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 ? `${classes.primaryBtn} border-current shadow-md`: `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
             }`}
           >
-            <Wallet className="w-4 h-4 mr-2.5" />
+            <Wallet className={`w-4 h-4 mr-2.5 ${activeTab === 'caja' ? 'text-inherit' : primaryColorConfig.textAccent}`} />
             Cierre de Caja
           </button>
 
@@ -1363,7 +1363,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     ? `${classes.primaryBtn} border-current shadow-md`: `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
                 }`}
               >
-                <Utensils className="w-4 h-4 mr-2.5" />
+                <Utensils className={`w-4 h-4 mr-2.5 ${activeTab === 'menu_items' ? 'text-inherit' : primaryColorConfig.textAccent}`} />
                 Catálogo Menú
               </button>
 
@@ -1375,7 +1375,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                     ? `${classes.primaryBtn} border-current shadow-md`: `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
                 }`}
               >
-                <BarChart3 className="w-4 h-4 mr-2.5" />
+                <BarChart3 className={`w-4 h-4 mr-2.5 ${activeTab === 'metricas' ? 'text-inherit' : primaryColorConfig.textAccent}`} />
                 Métricas
               </button>
             </>
@@ -1395,7 +1395,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 ? `${classes.primaryBtn} border-current shadow-md`: `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
             }`}
           >
-            <TrendingUp className="w-4 h-4 mr-2.5" />
+            <TrendingUp className={`w-4 h-4 mr-2.5 ${activeTab === 'historial' ? 'text-inherit' : primaryColorConfig.textAccent}`} />
             Historial de Cierre
           </button>
 

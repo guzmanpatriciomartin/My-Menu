@@ -448,7 +448,7 @@ export const TablePOS: React.FC<POSProps> = ({
                       </span>
 
                       {item.available ? (
-                        <span className={`w-6 h-6 ${classes.radiusBtn} ${classes.secondaryBtn} group-hover:${classes.primaryBtn} flex items-center justify-center transition shadow-sm`}>
+                        <span className={`w-6 h-6 ${classes.radiusBtn} ${classes.primaryBtn} flex items-center justify-center transition shadow-sm`}>
                           <Plus className="w-3.5 h-3.5" />
                         </span>
                       ) : (
