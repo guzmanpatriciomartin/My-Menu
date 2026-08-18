@@ -16,3 +16,8 @@ service-account*.json
 service_account*.json
 *-firebase-adminsdk-*.json
 firebase-service-account*.json
+
+# curl cookie jars — contain live mimenu_session JWTs
+cookies.txt
+*.cookies
+cookiejar*
