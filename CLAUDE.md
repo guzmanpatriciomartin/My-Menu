@@ -116,8 +116,11 @@ puntos explícitamente.
    ya emitido no puede desbalancearse.
 4. La pertenencia a un cierre de caja es por **estampa de `cashCloseId`**, no por ventana de
    tiempo. Eso es lo que garantiza que un pedido no se cuente dos veces ni se pierda.
-5. Si agregás una colección a Firestore, agregá su regla en `firestore.rules` o el write falla
-   silenciosamente en runtime.
+5. Una colección nueva **no** necesita regla en `firestore.rules`: el Admin SDK no las evalúa, y
+   desde ADR-006 Paso 5 el archivo es un deny-all catch-all. Esto era lo contrario antes, y esa
+   asimetría causó un bug real: `tableCloses` se escribió durante varios commits sin `match`,
+   Firestore denegaba por default, el error se tragaba en un `catch`, y los recibos vivían solo
+   en memoria hasta el reinicio — con la UI informando éxito.
 
 ## TypeScript no es estricto
 
@@ -162,34 +165,35 @@ Un cambio típico toca cinco archivos a la vez: `src/types.ts`, `src/server/sche
 
 ## Riesgo estructural que condiciona toda decisión de seguridad
 
-`firestore.rules` tiene `allow read, write: if true` en **todas** las colecciones, y
-`firebase-applet-config.json` está commiteado. Combinados: cualquiera con ese config puede leer
-y escribir la base entera **sin pasar por Express**, salteándose auth, validación zod,
-aislamiento de tenant y precios server-side.
+**Express es la única frontera de seguridad.** No hay una segunda línea detrás.
 
-Medido, no inferido: `runQuery` sin autenticar contra las 9 colecciones devuelve 200, y 403 en
-una colección sin regla. La escritura se sigue infiriendo del archivo de reglas.
+Hasta ADR-006 no era así, y la historia importa porque explica los comentarios que vas a
+encontrar en el código: el backend usaba el SDK **cliente**, quedaba sujeto a `firestore.rules`,
+y por eso las reglas tenían que estar en `allow read, write: if true` para que el server
+funcionara. El costo era que cualquiera con el `firebase-applet-config.json` commiteado leía y
+enumeraba la base entera sin autenticarse. Medido, no inferido: `runQuery` sin credenciales
+devolvía 200 en las nueve colecciones.
 
-**El bloqueo que impedía cerrarlas ya no existe.** ADR-006 migró el backend al Admin SDK, que
-bypassea las reglas, y sacó el SDK cliente del proyecto. Como no queda ningún cliente de
-Firestore vivo —ni en el server ni en el bundle del frontend—, `firestore.rules` hoy gobierna
-exactamente a una población: atacantes no autenticados. Cerrarlas es funcionalmente un no-op
-para la app. Falta solo desplegar (Pasos 4 y 5 del ADR).
+Hoy el backend usa el Admin SDK (autoriza por IAM, no evalúa reglas) y `firestore.rules` es un
+deny-all catch-all. Verificado con la misma medición: **403 en las nueve**, y 403 también en el
+`get` de un documento concreto que antes respondía 200.
 
-**Mientras ese deploy no ocurra, toda mitigación en la capa Express es defensa en profundidad,
-no la frontera de seguridad real.** No concluyas "está cubierto" porque un endpoint valida bien:
-preguntate qué pasa si el atacante escribe directo en Firestore.
+Qué implica para cualquier cambio que hagas:
 
-**Cuando ocurra, el corolario se invierte y se vuelve más exigente:** Express pasa a ser la
-única frontera, y el aislamiento por `establishmentId` en `src/server/store.ts` deja de tener
-red de contención. Un bug de tenant ahí ya no lo tapa nada.
+- El aislamiento por `establishmentId` en `src/server/store.ts` **no tiene red de contención**.
+  Antes, un bug de tenant ahí era grave; ahora es la única cosa que separa a dos negocios.
+- Un endpoint que valida bien ya sí cuenta como cobertura real — pero por lo mismo, uno que
+  valida mal ya no tiene nada detrás que lo tape.
+- Los comentarios que digan "defensa en profundidad, no la frontera real" (etiquetas `F-*`,
+  `ALTO-*`, `MED-*`) se escribieron bajo el régimen viejo. La mitigación sigue siendo válida; la
+  relativización de su importancia, no.
 
 ## Deuda conocida
 
 Ya identificada — no hace falta redescubrirla:
 
-1. `firestore.rules` completamente abierto (arriba). **Ya no está bloqueado**: falta el deploy
-   de los Pasos 4 y 5 del ADR-006.
+1. ~~`firestore.rules` abierto~~ **Cerrado y verificado** (ADR-006 Paso 5). Queda como historia
+   porque explica los comentarios de auditorías previas en el código.
 2. `SECURITY_BACKLOG.md` y `README.md` no existen, pero `firestore.rules` cita el primero.
 3. `ADR-005` (cierre de caja y métricas) se cita en varios archivos y **sigue sin escribirse**.
    `ADR-006` sí existe, en `docs/adr/`.
