@@ -30,6 +30,14 @@ service cloud.firestore {
     match /cashRegisters/{docId} {
       allow read, write: if true;
     }
+    // Added late: the store has been writing (store.ts) and listening on this collection
+    // since f276b15, but there was no rule for it. Firestore denies by default on any path
+    // without one, so every write failed, the error was swallowed by a console.error, and
+    // the receipts survived only in memory — lost on each restart. Same open-access
+    // decision as the rest of the database; see ADR-006 for closing all of this.
+    match /tableCloses/{docId} {
+      allow read, write: if true;
+    }
   }
 }
 
