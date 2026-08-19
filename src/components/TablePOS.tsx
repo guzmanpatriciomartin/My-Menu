@@ -277,22 +277,10 @@ export const TablePOS: React.FC<POSProps> = ({
               />
               <span className={`text-xs font-bold ${classes.textSecondary} font-mono`}>
                 {activeTableOrders.length > 0
-                  ? `${activeTableOrders.length} pedido(s) activo(s) • ${formatPrice(tableAccumulatedTotal)}`
-                  : 'Mesa libre / Sin consumos'}
+                  ? `${activeTableOrders.length} pedido(s) activo(s)`
+                  : 'Mesa libre'}
               </span>
             </div>
-          )}
-
-          {activeTableOrders.length > 0 && onOpenTableBill && selectedTableId && (
-            <button
-              id="pos-open-table-bill-btn"
-              onClick={() => onOpenTableBill(selectedTableId)}
-              className={`px-3.5 py-2 ${classes.radiusBtn} ${classes.primaryBtn} font-black text-xs uppercase tracking-wider flex items-center gap-1.5 transition shadow-sm cursor-pointer`}
-              title="Cerrar o cobrar la cuenta de esta mesa"
-            >
-              <Receipt className="w-3.5 h-3.5" />
-              Cobrar Mesa
-            </button>
           )}
         </div>
       </div>
@@ -466,7 +454,7 @@ export const TablePOS: React.FC<POSProps> = ({
 
         {/* Right column: Cart & Commander Summary (5 cols) */}
         <div className="lg:col-span-5 xl:col-span-4 space-y-4">
-          <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-4 flex flex-col h-full min-h-[500px] shadow-xl sticky top-4 transition-colors`}>
+          <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-4 flex flex-col shadow-xl sticky top-4 transition-all duration-200`}>
             {/* Cart Header */}
             <div className={`flex items-center justify-between pb-3 border-b ${classes.borderDivider}`}>
               <div className="space-y-0.5">
@@ -491,10 +479,10 @@ export const TablePOS: React.FC<POSProps> = ({
             </div>
 
             {/* Cart Items List */}
-            <div className={`flex-1 overflow-y-auto py-3 space-y-2.5 divide-y ${classes.borderDivider}`}>
+            <div className={`py-3 space-y-2.5 divide-y ${classes.borderDivider}`}>
               {cart.length === 0 ? (
-                <div className={`h-full flex flex-col items-center justify-center text-center py-12 ${classes.textMuted} space-y-2`}>
-                  <UtensilsCrossed className="w-8 h-8 stroke-[1.5] opacity-40" />
+                <div className={`flex flex-col items-center justify-center text-center py-6 ${classes.textMuted} space-y-2`}>
+                  <UtensilsCrossed className="w-7 h-7 stroke-[1.5] opacity-40" />
                   <p className={`text-xs font-bold uppercase tracking-wider ${classes.textPrimary}`}>
                     Comanda vacía
                   </p>
