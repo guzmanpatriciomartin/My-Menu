@@ -1,43 +1,41 @@
 rules_version = '2';
 
+// Deny everything, to everyone, on every path. ADR-006 Paso 5.
+//
+// This is not a lockdown of a working system — it is the removal of an access path nothing
+// legitimate uses any more. Until ADR-006, the backend reached Firestore with the CLIENT SDK,
+// so it was subject to these rules and they had to stay open for the server to function at
+// all; the price was that the whole database was readable and writable by anyone holding
+// firebase-applet-config.json, which is committed to a public repository. That was measured,
+// not assumed: an unauthenticated runQuery returned 200 on all nine collections.
+//
+// The backend now uses the Admin SDK, which authenticates by IAM and does not evaluate these
+// rules. No client SDK survives anywhere in the project: `firebase` is out of package.json,
+// src/lib/firebase.ts is deleted, no component imports Firestore, and `npm run build` produces
+// a bundle with zero occurrences of firestore.googleapis.com. So by the time this rule set is
+// deployed, it governs exactly one population — unauthenticated third parties — and denying
+// them is functionally a no-op for the application.
+//
+// A catch-all rather than `if false` per collection. Both close the same door; the difference
+// is what happens next. With a catch-all, a new collection is denied by default instead of
+// needing its own rule, which makes the tableCloses class of bug structurally impossible: that
+// collection was written and listened to for several commits with no `match` block, so every
+// write was rejected, the error was swallowed, and the receipts lived only in memory until the
+// next restart. Nobody noticed, because the UI reported success.
+//
+// Two things that keep working, so their failure is not misread as caused by this:
+//   - The Firebase console and gcloud. They authorize through IAM, not through rules.
+//   - Every read and write the app performs, including the _health heartbeat.
+//
+// If something DOES break after deploying this, the cause is a Firestore client that was not
+// found during the migration, and the fix is to move it to the Admin SDK — not to reopen this
+// file. Reverting is one deploy away (`firebase deploy --only firestore:rules` on the previous
+// commit) and that is the intended escape hatch, but it reopens the database to the internet,
+// so it buys time rather than solving anything.
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /establishments/{docId} {
-      allow read, write: if true;
-    }
-    match /categories/{docId} {
-      allow read, write: if true;
-    }
-    match /menuItems/{docId} {
-      allow read, write: if true;
-    }
-    match /tables/{docId} {
-      allow read, write: if true;
-    }
-    match /orders/{docId} {
-      allow read, write: if true;
-    }
-    match /tableCalls/{docId} {
-      allow read, write: if true;
-    }
-    // Cash closes are accounting records. They follow the same open-access decision as
-    // the rest of the database (see SECURITY_BACKLOG.md): the backend reaches Firestore
-    // with the client SDK, so it is subject to these rules and cannot write if they are
-    // closed. Anything financial makes tightening this more urgent, not less.
-    match /cashCloses/{docId} {
-      allow read, write: if true;
-    }
-    match /cashRegisters/{docId} {
-      allow read, write: if true;
-    }
-    // Added late: the store has been writing (store.ts) and listening on this collection
-    // since f276b15, but there was no rule for it. Firestore denies by default on any path
-    // without one, so every write failed, the error was swallowed by a console.error, and
-    // the receipts survived only in memory — lost on each restart. Same open-access
-    // decision as the rest of the database; see ADR-006 for closing all of this.
-    match /tableCloses/{docId} {
-      allow read, write: if true;
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }
-
