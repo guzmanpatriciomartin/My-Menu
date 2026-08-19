@@ -1,7 +1,12 @@
-// MUST be the first import: it populates process.env from .env before any other module
-// is evaluated. src/server/store -> src/lib/firebase-admin reads the Firebase credential
-// vars at module load, so loading .env later (e.g. in the function body) would be too late.
+// MUST be the first import: it populates process.env from .env before any other module is
+// evaluated. src/lib/firebase-admin reads FIREBASE_PROJECT_ID / FIRESTORE_DATABASE_ID /
+// GOOGLE_APPLICATION_CREDENTIALS at module load, so loading .env later (e.g. in the function
+// body) would be too late and the Admin SDK would resolve the wrong database.
 import 'dotenv/config';
+// Initializes the Admin SDK and runs its boot probe (ADR-006 Paso 1). Imported before the store
+// so the credential/ADC line is the first thing in the log; the store now depends on adminDb for
+// everything, reads and listeners included.
+import { adminProbe } from './src/lib/firebase-admin';
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import cookieParser from 'cookie-parser';
@@ -11,7 +16,7 @@ import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 import { createServer as createViteServer } from 'vite';
 import { store } from './src/server/store';
-import type { CreateOrderResult } from './src/server/store';
+import type { CreateOrderResult, FirestoreHealth } from './src/server/store';
 import { findUserByEmail, verifyPassword, DUMMY_PASSWORD_HASH } from './src/server/users';
 import { requireAuth, requireRole, verifySession, SECRET, SESSION_COOKIE } from './src/server/auth';
 import {
@@ -32,6 +37,34 @@ import {
 } from './src/server/schemas';
 
 const SESSION_TTL_SECONDS = 8 * 60 * 60; // 8 hours
+
+// Boot probe result, mirrored into a plain value for /api/health. It is not awaited in the
+// handler on purpose: the probe retries with a 20s budget per attempt, and a health check that
+// blocks for that long during a cold boot is worse than one that answers 'pending'.
+let probeState: 'pending' | 'ok' | 'failed' = 'pending';
+adminProbe.then(
+  (ok) => { probeState = ok ? 'ok' : 'failed'; },
+  () => { probeState = 'failed'; }
+);
+
+// One definition of "degraded", shared by the public probe and the admin detail below, so the two
+// can never disagree about the same instance while reporting different amounts of it.
+// `writePath`/`heartbeatStream` at 'pending' deliberately do NOT count: that is the boot state,
+// when no beat has settled yet, and treating it as a failure would make every cold start degraded.
+function isDegraded(firestore: FirestoreHealth): boolean {
+  return (
+    firestore.live < firestore.total ||
+    firestore.errors.length > 0 ||
+    probeState === 'failed' ||
+    // Everything above is a read. A credential with read but no write access leaves all of it
+    // green while nothing the panel does actually persists.
+    firestore.writePath === 'failing' ||
+    // A watch stream can freeze without ever invoking its error handler (seen with a nonexistent
+    // FIRESTORE_DATABASE_ID: the Admin SDK retried internally and the handler never fired), so an
+    // empty `errors` is not proof of life — a missing round-trip is.
+    firestore.heartbeatStream === 'stalled'
+  );
+}
 
 // Cookie attributes shared by the login (set) and logout (clear) so the browser
 // actually removes the cookie — clearCookie only matches when path/sameSite/etc align.
@@ -148,8 +181,64 @@ async function startServer() {
   });
 
   // API REST Endpoints
+  // Liveness of the Firestore mirror, not just of the process (ADR-006 Paso 3). The failure
+  // mode this exists for: the Admin SDK cannot reach Firestore (credential, IAM, wrong
+  // database), the 9 listeners die at boot without resubscribing, and the store keeps serving
+  // the demo seed data it loaded in its constructor — orders, prices and cash closes that were
+  // never real, behind a panel that looks completely normal. A fixed {status:'ok'} made that
+  // invisible, which is why closing firestore.rules (Paso 5) waits on this endpoint.
+  //
+  // Split in two on purpose. This one is public because a platform probe needs it, so it carries
+  // the verdict and nothing else. The detail used to be here, unauthenticated, and
+  // `lastSnapshotAt` is the maximum over all nine collections and ALL tenants: polled every few
+  // seconds — comfortably inside the 600/min apiLimiter — it is a time series of every write on
+  // the platform, which is real opening hours, order cadence and which days each venue works.
+  // For someone writing straight into Firestore it doubles as confirmation that an injected
+  // document was ingested. `down[]` and `probe` additionally announce when the instance is
+  // degraded and therefore serving seed data.
+  //
+  // `status` stays public knowing it is itself a coarse degraded oracle — a probe that cannot
+  // tell healthy from degraded is not a probe, so that trade is accepted; the detail behind it
+  // is not.
   app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', time: new Date().toISOString() });
+    // Deliberately still HTTP 200 even when degraded: the process is serving requests, and this
+    // endpoint's response code may be wired to a platform health check we do not control — a 503
+    // here could start recycling revisions that are degraded but useful. The signal is the body.
+    res.json({
+      status: isDegraded(store.getFirestoreHealth()) ? 'degraded' : 'ok',
+      time: new Date().toISOString(),
+    });
+  });
+
+  // The operational detail, admin-only. The alternative was keeping it public with a bucketized
+  // age ('<1m' / '<15m' / 'older') instead of a timestamp; rejected because it only fixes the one
+  // field while down[], probe, errors and the heartbeat verdicts stay published, and because the
+  // exact numbers are what the Paso 4 gate is watching — buckets are strictly worse to operate
+  // with. An admin login is a cheap price for keeping the useful form.
+  // Still counters, enums, timestamps and coarse error codes only: no raw Firestore message ever
+  // reaches this body, because those carry project and database ids.
+  app.get('/api/health/details', requireAuth, requireRole('admin'), (req, res) => {
+    const firestore = store.getFirestoreHealth();
+    res.json({
+      status: isDegraded(firestore) ? 'degraded' : 'ok',
+      time: new Date().toISOString(),
+      firestore: {
+        listeners: firestore.listeners,
+        lastSnapshotAt: firestore.lastSnapshotAt || null,
+        down: firestore.down,
+        errors: firestore.errors,
+        probe: probeState,
+        // Write path and stream, from the heartbeat in src/server/store.ts. Read `writePath`
+        // first: 'failing' means writes are rejected, which is the actionable half and usually
+        // the reason `heartbeatStream` went stalled too.
+        writePath: firestore.writePath,
+        heartbeatStream: firestore.heartbeatStream,
+        heartbeatLagMs: firestore.heartbeatLagMs ?? null,
+        heartbeatIntervalMs: firestore.heartbeatIntervalMs,
+        heartbeatStaleAfterMs: firestore.heartbeatStaleAfterMs,
+        heartbeatErrorCode: firestore.heartbeatErrorCode || null,
+      },
+    });
   });
 
   // Seed/reset demo data (F-9): admin only AND env-gated. Disabled in production unless
@@ -495,14 +584,30 @@ async function startServer() {
             .status(409)
             .json({ error: 'La caja se encuentra cerrada. Debe abrir la caja para iniciar un turno antes de cerrarla.' });
         }
-        // The close was computed but could not be persisted, so nothing was recorded and
-        // the orders are still pending. Retrying is safe.
+        // The close was computed but the first batch never landed, so nothing was recorded and
+        // the orders are still pending. Retrying is safe. The message no longer points at
+        // firestore.rules: since ADR-006 Paso 2 the Admin SDK bypasses them, so they cannot be
+        // the cause and sending the operator to check them wastes the one diagnostic they get.
         if (result.reason === 'storage_error') {
           return res.status(503).json({
             error:
               'No se pudo registrar el cierre: la base de datos rechazó la escritura. ' +
-              'No se guardó nada, podés reintentar. Verificá que las reglas de Firestore ' +
-              'estén desplegadas para las colecciones cashCloses y cashRegisters.',
+              'No se guardó nada, podés reintentar. Si vuelve a fallar, revisá los logs del ' +
+              'servidor: el acceso a Firestore del backend puede estar mal configurado.',
+          });
+        }
+        // A close big enough to need several batches failed after the first one committed: the
+        // close and the register closure ARE persisted and part of the orders are stamped. The
+        // operator must NOT be told to retry — the unstamped orders would be counted again in a
+        // second close, on top of one that already exists. Only a manual repair fixes this, so
+        // the id travels in the message.
+        if (result.reason === 'partial_close') {
+          return res.status(503).json({
+            error:
+              'El cierre se registró de forma incompleta: quedaron pedidos sin sellar. ' +
+              'NO reintentes el cierre, se contarían dos veces. Avisá al administrador con ' +
+              `este identificador de cierre: ${result.close?.id ?? 'desconocido'}. ` +
+              'El detalle está en los logs del servidor.',
           });
         }
         return res

@@ -16,6 +16,24 @@ const fmtDateTime = (iso: string) => {
 
 const shortId = (id: string) => id.slice(-4).toUpperCase();
 
+const HTML_ESCAPES: Record<string, string> = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;',
+};
+
+// Escape anything interpolated into the ticket markup below. Two of those values —
+// `dinerName` and `item.comment` — reach us straight from POST /api/establishments/:id/orders,
+// which is public and unauthenticated; the server bounds their LENGTH but does not escape
+// them. openPrint() then writes the markup into an about:blank window, which inherits this
+// origin, so an unescaped `<script>` would run with the staff member's session cookie —
+// turning a diner's order comment into admin-level actions. helmet ships with CSP disabled,
+// so there is no second line of defence. Escape at the interpolation, always.
+const esc = (value: unknown): string =>
+  String(value ?? '').replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch]);
+
 const THERMAL_CSS = `
   @page { size: 55mm auto; margin: 0; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -65,9 +83,9 @@ export function printKitchenTicket(order: Order) {
   const itemsHtml = order.items.map(i => `
     <div class="row-qty">
       <span class="qty">${i.quantity}x</span>
-      <span class="item-name bold">${i.name}</span>
+      <span class="item-name bold">${esc(i.name)}</span>
     </div>
-    ${i.comment ? `<div class="comment">→ ${i.comment}</div>` : ''}
+    ${i.comment ? `<div class="comment">→ ${esc(i.comment)}</div>` : ''}
   `).join('');
 
   const html = `
@@ -75,8 +93,8 @@ export function printKitchenTicket(order: Order) {
     <div class="center tag">#${shortId(order.id)} · ${fmtTime(order.createdAt)}</div>
     <div class="divider-solid"></div>
     <div class="row">
-      <span class="bold">${order.tableName}</span>
-      ${order.dinerName ? `<span class="tag">${order.dinerName}</span>` : ''}
+      <span class="bold">${esc(order.tableName)}</span>
+      ${order.dinerName ? `<span class="tag">${esc(order.dinerName)}</span>` : ''}
     </div>
     <div class="divider"></div>
     ${itemsHtml}
@@ -105,10 +123,10 @@ export function printTableBill(
     const orderTotal = o.items.reduce((s, i) => s + i.price * i.quantity, 0);
     const itemsHtml = o.items.map(i => `
       <div class="row">
-        <span class="item-name">${i.quantity}x ${i.name}</span>
+        <span class="item-name">${i.quantity}x ${esc(i.name)}</span>
         <span class="item-price">${fmt(i.price * i.quantity)}</span>
       </div>
-      ${i.comment ? `<div class="comment">→ ${i.comment}</div>` : ''}
+      ${i.comment ? `<div class="comment">→ ${esc(i.comment)}</div>` : ''}
     `).join('');
 
     return `
@@ -122,11 +140,11 @@ export function printTableBill(
   }).join('');
 
   const html = `
-    <h1>${estName || 'Mi Menú'}</h1>
+    <h1>${esc(estName || 'Mi Menú')}</h1>
     <div class="divider-solid"></div>
-    <div class="row"><span class="bold">Mesa:</span><span>${tableName}</span></div>
-    ${dinerNames.length > 0 ? `<div class="row"><span class="bold">Cliente:</span><span>${dinerNames.join(', ')}</span></div>` : ''}
-    ${closedByName ? `<div class="row tag"><span class="bold">Atendido por:</span><span>${closedByName}</span></div>` : ''}
+    <div class="row"><span class="bold">Mesa:</span><span>${esc(tableName)}</span></div>
+    ${dinerNames.length > 0 ? `<div class="row"><span class="bold">Cliente:</span><span>${esc(dinerNames.join(', '))}</span></div>` : ''}
+    ${closedByName ? `<div class="row tag"><span class="bold">Atendido por:</span><span>${esc(closedByName)}</span></div>` : ''}
     <div class="tag">${timestamp}</div>
     <div class="divider-solid"></div>
     ${ordersHtml}
