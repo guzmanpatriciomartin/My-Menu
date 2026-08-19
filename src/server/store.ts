@@ -1502,6 +1502,10 @@ class Store {
   public previewCashClose(establishmentId: string): CashClosePreview {
     const register = this.getCashRegister(establishmentId);
     const pending = register.isOpen ? this.pendingCashCloseOrders(establishmentId) : [];
+    // Visibility only: unlike `pending`, this ignores register state, so the panel can warn
+    // that delivered sales are waiting to be swept into the next close. Deliberately does not
+    // feed totals/topProducts/byTable — what enters a close is unchanged.
+    const unsealed = register.isOpen ? pending : this.pendingCashCloseOrders(establishmentId);
     return {
       isOpen: register.isOpen,
       openedAt: register.openedAt,
@@ -1514,6 +1518,7 @@ class Store {
       totals: computeTotals(pending),
       topProducts: computeTopProducts(pending),
       byTable: computeByTable(pending),
+      unsealedTotals: computeTotals(unsealed),
     };
   }
 

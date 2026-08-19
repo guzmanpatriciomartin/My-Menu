@@ -126,6 +126,14 @@ export interface CashClosePreview {
   totals: CashCloseTotals;
   topProducts: ProductLine[];
   byTable: TableLine[];
+  // Delivered-and-unstamped sales, reported regardless of whether the register is open.
+  // `totals` mirrors what a close would seal, so with the register closed it is all zeros
+  // and the panel has no way to tell that money is sitting unsealed. Nothing couples order
+  // creation to the register state — a diner ordering by QR neither knows nor can know it —
+  // so those sales get swept into whichever close is emitted next, possibly another shift or
+  // another day (membership is by cashCloseId stamp, not by time window). This field exists
+  // only to make that visible; it never decides what enters a close.
+  unsealedTotals: CashCloseTotals;
 }
 
 export interface CashClose {

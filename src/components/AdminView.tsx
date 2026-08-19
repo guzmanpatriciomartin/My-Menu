@@ -2126,6 +2126,24 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                 )}
               </div>
 
+              {/* Unsealed sales with the register closed. Order creation is not coupled to the
+                  register state, so delivered sales pile up unstamped and get swept into
+                  whichever close is emitted next — possibly another shift. Visibility only. */}
+              {cashPreview && !cashPreview.isOpen && (cashPreview.unsealedTotals?.orderCount ?? 0) > 0 && (
+                <div className="p-4.5 bg-rose-500/10 border border-rose-500/30 rounded-xl flex items-start space-x-3">
+                  <AlertCircle className="w-5 h-5 text-rose-500 shrink-0 mt-0.5" />
+                  <div>
+                    <p className={`text-xs font-bold ${classes.textPrimary}`}>
+                      Hay <span className="font-mono font-black text-rose-500">{cashPreview.unsealedTotals.orderCount}</span> pedido(s) entregados sin cerrar, por{' '}
+                      <span className="font-mono font-black text-rose-500">{formatPrice(cashPreview.unsealedTotals.totalRevenue)}</span>, con la caja cerrada.
+                    </p>
+                    <p className={`text-[10px] ${classes.textMuted} mt-0.5`}>
+                      Estas ventas van a entrar en el próximo cierre que se emita, aunque sea de otro turno o de otro día.
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {/* Notice if there are active orders pending in kitchen or tables */}
               {activeOrdersList.length > 0 && (
                 <div className="p-4.5 bg-amber-500/10 border border-amber-500/30 rounded-xl flex items-center justify-between flex-wrap gap-3">
