@@ -199,23 +199,41 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     };
   }, []);
 
-  // Fetch all DB state elements for active establishment
-  const fetchDbState = async () => {
+  // Catalog: establishments, categories and menu items. These only change when an admin
+  // edits them — never from diner activity — so they are NOT part of the live refresh
+  // cycle. Fetched on mount, after a local edit, and on the slow reconcile interval that
+  // picks up edits made from another device.
+  const fetchCatalog = async () => {
     if (!currentUser) return;
     const estId = currentUser.establishmentId;
     try {
-      const [estRes, catRes, menuRes, tabRes, ordRes, callsRes] = await Promise.all([
+      const [estRes, catRes, menuRes] = await Promise.all([
         fetch('/api/establishments', { credentials: 'include' }).then(r => r.json()),
         fetch(`/api/establishments/${estId}/categories`, { credentials: 'include' }).then(r => r.json()),
         fetch(`/api/establishments/${estId}/menu-items`, { credentials: 'include' }).then(r => r.json()),
-        fetch(`/api/establishments/${estId}/tables`, { credentials: 'include' }).then(r => r.json()),
-        fetch('/api/my/orders', { credentials: 'include' }).then(r => r.json()),
-        fetch('/api/my/calls', { credentials: 'include' }).then(r => r.json()).catch(() => [])
       ]);
 
       if (Array.isArray(estRes)) setEstablishments(estRes);
       if (Array.isArray(catRes)) setCategories(catRes);
       if (Array.isArray(menuRes)) setMenuItems(menuRes);
+    } catch (err) {
+      console.error('Error fetching catalog', err);
+    }
+  };
+
+  // Live state: what a diner can change without the panel doing anything. `tables` belongs
+  // here despite looking like catalog — the server stamps isOccupied / activeOrdersCount /
+  // lastClosedAt onto it, and getTableOccupancy prefers those server values.
+  const fetchLiveState = async () => {
+    if (!currentUser) return;
+    const estId = currentUser.establishmentId;
+    try {
+      const [tabRes, ordRes, callsRes] = await Promise.all([
+        fetch(`/api/establishments/${estId}/tables`, { credentials: 'include' }).then(r => r.json()),
+        fetch('/api/my/orders', { credentials: 'include' }).then(r => r.json()),
+        fetch('/api/my/calls', { credentials: 'include' }).then(r => r.json()).catch(() => [])
+      ]);
+
       if (Array.isArray(tabRes)) {
         const tableMap = new Map<string, Table>();
         tabRes.forEach((t: Table) => tableMap.set(t.id, t));
@@ -238,7 +256,9 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
 
       if ((orderCountRef.current !== null && currentReceivedOrders > orderCountRef.current) ||
           (callCountRef.current !== null && currentPendingCalls > callCountRef.current)) {
-        if (soundEnabled) {
+        // Read through the ref: this runs from long-lived closures (SSE, interval) that
+        // must not be torn down and rebuilt just because the sound toggle changed (F-6).
+        if (soundEnabledRef.current) {
           playNewOrderSound();
         }
       }
@@ -253,6 +273,12 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     } finally {
       setLoading(false);
     }
+  };
+
+  // Full refresh — use after a local mutation that may have touched both catalog and
+  // live state (seeding, table edits), or when correctness matters more than request count.
+  const fetchDbState = async () => {
+    await Promise.all([fetchCatalog(), fetchLiveState()]);
   };
 
   const fetchTableCloses = async () => {
@@ -277,7 +303,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
         body: JSON.stringify({ status: 'attended' })
       });
       if (res.ok) {
-        fetchDbState();
+        fetchLiveState();
       }
     } catch (err) {
       console.error('Error attending call', err);
@@ -298,12 +324,12 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
         credentials: 'include'
       });
       if (res.ok) {
-        await fetchDbState();
+        await fetchLiveState();
         await fetchTableCloses();
       } else {
         const data = await res.json().catch(() => ({}));
         alert(data.error || 'No se pudo cerrar la mesa porque ya se encuentra cerrada o no tiene pedidos activos.');
-        await fetchDbState();
+        await fetchLiveState();
       }
     } catch (err) {
       console.error('Error closing table session', err);
@@ -326,21 +352,34 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     }
   };
 
+  // Perceived latency comes from SSE, which pushes every order, call and cash event. These
+  // intervals are only reconciliation: they exist to recover from a dropped SSE connection
+  // and to pick up edits made from another device. Polling at 3s was doing 7 requests every
+  // 3 seconds per open tab (~8.4k/hour) to re-fetch data SSE had already delivered, and it
+  // kept the Cloud Run instance from ever scaling to zero while a tab stayed open.
   useEffect(() => {
-    fetchDbState();
-    if (activeTab === 'caja') {
-      fetchCashState();
-    }
-    
-    // Polling every 3 seconds for active changes
-    const interval = setInterval(() => {
-      fetchDbState();
-      if (activeTab === 'caja') {
-        fetchCashState();
-      }
-    }, 3000);
-    return () => clearInterval(interval);
-  }, [currentUser, activeEstId, soundEnabled, activeTab]);
+    if (!currentUser) return;
+
+    fetchCatalog();
+    fetchLiveState();
+    if (activeTabRef.current === 'caja') fetchCashState();
+
+    const liveInterval = setInterval(() => {
+      fetchLiveState();
+      if (activeTabRef.current === 'caja') fetchCashState();
+    }, 30_000);
+
+    // Catalog changes are admin-initiated and already refetched locally after each edit;
+    // this slower pass only covers a second device editing the same menu.
+    const catalogInterval = setInterval(fetchCatalog, 120_000);
+
+    return () => {
+      clearInterval(liveInterval);
+      clearInterval(catalogInterval);
+    };
+    // activeTab and soundEnabled are deliberately absent: both are read through refs, so
+    // switching tabs or muting no longer tears down and rebuilds the intervals.
+  }, [currentUser, activeEstId]);
 
   // Load tab data on demand: neither panel is needed until it is opened, and the metrics
   // endpoint is admin-only (a waiter opening the app should never call it).
@@ -363,12 +402,14 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       sse.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data);
+          // Every event type here is live state only — none of them can change the catalog,
+          // so fetchLiveState() is enough and skips 3 redundant requests per event.
           if ((msg.type === 'ORDER_CREATED' || msg.type === 'TABLE_CALL_CREATED') && msg.payload.establishmentId === activeEstId) {
-            // Pull fresh lists; sound is handled inside fetchDbState via orderCountRef comparison (F-1)
-            fetchDbState();
+            // Pull fresh lists; sound is handled inside fetchLiveState via orderCountRef comparison (F-1)
+            fetchLiveState();
             if (activeTabRef.current === 'caja') fetchCashState();
           } else if ((msg.type === 'ORDER_STATUS_CHANGED' || msg.type === 'TABLE_SESSION_CLOSED' || msg.type === 'CASH_CLOSED' || msg.type === 'CASH_OPENED') && msg.payload.establishmentId === activeEstId) {
-            fetchDbState();
+            fetchLiveState();
             if (activeTabRef.current === 'caja') fetchCashState();
           }
         } catch (e) {
@@ -403,7 +444,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
         body: JSON.stringify({ status: nextStatus })
       });
       if (res.ok) {
-        fetchDbState();
+        fetchLiveState();
         if (selectedOrder?.id === order.id) {
           const updated = await res.json();
           setSelectedOrder(updated);
@@ -567,7 +608,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
         body: JSON.stringify(payload)
       });
       if (res.ok) {
-        fetchDbState();
+        fetchCatalog();
         setIsItemModalOpen(false);
         setEditingItem(null);
       }
@@ -583,7 +624,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
         method: 'DELETE',
         credentials: 'include'
       });
-      if (res.ok) fetchDbState();
+      if (res.ok) fetchCatalog();
     } catch (e) {
       console.error(e);
     }
@@ -609,7 +650,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
         body: JSON.stringify(payload)
       });
       if (res.ok) {
-        fetchDbState();
+        fetchCatalog();
         setIsCategoryModalOpen(false);
         setEditingCategory(null);
       }
@@ -625,7 +666,8 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
         method: 'DELETE',
         credentials: 'include'
       });
-      if (res.ok) fetchDbState();
+      // Deleting a category cascades to its menu items — catalog only, no live state.
+      if (res.ok) fetchCatalog();
     } catch (e) {
       console.error(e);
     }
@@ -652,7 +694,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
         body: JSON.stringify(payload)
       });
       if (res.ok) {
-        await fetchDbState();
+        await fetchLiveState();
         setIsTableModalOpen(false);
         setEditingTable(null);
       } else {
@@ -673,7 +715,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
         method: 'DELETE',
         credentials: 'include'
       });
-      if (res.ok) fetchDbState();
+      if (res.ok) fetchLiveState();
     } catch (e) {
       console.error(e);
     }
@@ -840,7 +882,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       setCashCloseNote('');
       // Re-read instead of patching locally: the server is the source of truth for what
       // ended up inside the close.
-      await Promise.all([fetchCashState(), fetchDbState()]);
+      await Promise.all([fetchCashState(), fetchLiveState()]);
     } catch (err) {
       console.error('Cash close failed', err);
       setCashError('No se pudo conectar con el servidor.');
@@ -874,7 +916,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
       setCashOpenNote('');
       setCashOpenInitialAmount(0);
       setLastReceipt(null);
-      await Promise.all([fetchCashState(), fetchDbState()]);
+      await Promise.all([fetchCashState(), fetchLiveState()]);
     } catch (err) {
       console.error('Cash open failed', err);
       setCashError('No se pudo conectar con el servidor.');
@@ -1395,7 +1437,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               menuItems={menuItems}
               orders={orders}
               formatPrice={formatPrice}
-              onOrderCreated={() => fetchDbState()}
+              onOrderCreated={() => fetchLiveState()}
               onOpenTableBill={(tId) => setBillModalTableId(tId)}
             />
           )}
@@ -1769,7 +1811,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
                                       credentials: 'include',
                                       body: JSON.stringify(payload)
                                     });
-                                    fetchDbState();
+                                    fetchCatalog();
                                   } catch (e) {
                                     console.error(e);
                                   }
