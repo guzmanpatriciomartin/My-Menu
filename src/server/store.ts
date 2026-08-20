@@ -33,7 +33,10 @@ import {
   TableLine,
   TableCloseReceipt,
   UserRole,
+  User,
+  Subscription,
 } from '../types';
+import { logger } from './logger';
 import {
   computeByHour,
   computeByTable,
@@ -168,6 +171,8 @@ const WATCHED_COLLECTIONS = [
   'cashCloses',
   'cashRegisters',
   'tableCloses',
+  'users',
+  'subscriptions',
 ] as const;
 
 type WatchedCollection = (typeof WATCHED_COLLECTIONS)[number];
@@ -300,6 +305,64 @@ function listenerErrorCode(err: unknown): string {
   return 'error';
 }
 
+export const initialUsers: User[] = [
+  {
+    id: 'usr-1',
+    email: 'carolina@mimenu.com',
+    establishmentId: 'bodegon-palermo',
+    role: 'admin',
+    name: 'Carolina (Admin)',
+    active: true,
+    createdAt: 1700000000000,
+  },
+  {
+    id: 'usr-2',
+    email: 'tomas@mimenu.com',
+    establishmentId: 'bodegon-palermo',
+    role: 'waiter',
+    name: 'Tomás (Mozo)',
+    active: true,
+    createdAt: 1700000000000,
+  },
+  {
+    id: 'usr-3',
+    email: 'martin@mimenu.com',
+    establishmentId: 'cafe-speakeasy',
+    role: 'admin',
+    name: 'Martín (Admin)',
+    active: true,
+    createdAt: 1700000000000,
+  },
+  {
+    id: 'usr-4',
+    email: 'sofia@mimenu.com',
+    establishmentId: 'cafe-speakeasy',
+    role: 'waiter',
+    name: 'Sofía (Moza)',
+    active: true,
+    createdAt: 1700000000000,
+  },
+];
+
+export const initialSubscriptions: Subscription[] = [
+  {
+    id: 'sub-palermo',
+    establishmentId: 'bodegon-palermo',
+    planId: 'pro',
+    status: 'active',
+    currentPeriodEnd: Date.now() + 365 * 24 * 60 * 60 * 1000,
+    activatedManually: true,
+  },
+  {
+    id: 'sub-speakeasy',
+    establishmentId: 'cafe-speakeasy',
+    planId: 'pro',
+    status: 'active',
+    currentPeriodEnd: Date.now() + 365 * 24 * 60 * 60 * 1000,
+    activatedManually: true,
+  },
+];
+
 function getSeedCollections(): Array<{ name: string; items: Array<{ id: string }> }> {
   return [
     { name: 'establishments', items: initialEstablishments },
@@ -310,12 +373,8 @@ function getSeedCollections(): Array<{ name: string; items: Array<{ id: string }
     { name: 'tableCalls', items: generateSeedTableCalls() },
     { name: 'cashCloses', items: generateSeedCashCloses() },
     { name: 'cashRegisters', items: generateSeedCashRegisters() },
-    // tableCloses is deliberately NOT seeded. The database is past its demo stage and holds
-    // real usage, so injecting a demo receipt into the venue's own closing history would be
-    // indistinguishable from a real one in the admin panel. The collection fills up from
-    // actual table closes instead. (The generator that used to sit here always returned an
-    // empty array anyway: it filtered on tableId 'tbl-palermo-1', which never existed — the
-    // seed tables are 'tab-pal-1'..'tab-pal-5'. So nothing is being lost by dropping it.)
+    { name: 'users', items: initialUsers },
+    { name: 'subscriptions', items: initialSubscriptions },
   ];
 }
 
@@ -330,6 +389,10 @@ class Store {
     tables: initialTables,
     orders: generateSeedOrders(),
   };
+
+  private users: User[] = [...initialUsers];
+  private subscriptions: Subscription[] = [...initialSubscriptions];
+  private lastWriteError: { message: string; at: number } | null = null;
 
   private sseClients: SseClient[] = [];
   private tableCalls: TableCall[] = generateSeedTableCalls();
@@ -379,11 +442,6 @@ class Store {
   // Snapshot listeners keep this.data current. They ONLY mutate memory — they do NOT
   // call notifyClients. SSE notifications are emitted by the mutations themselves,
   // which carry the establishmentId needed for tenant/table segmentation (point 7).
-  //
-  // One line per collection: everything else is identical across the nine, and it used to be
-  // nine copies of the same ten lines (ADR-006 Paso 3). The point of collapsing them is not
-  // brevity — it is that a copy-paste block is where a wrong collection name or a field
-  // assigned to the wrong array hides, and nine copies means nine chances of it.
   private attachListeners() {
     this.watch<Establishment>('establishments', (rows) => (this.data.establishments = rows));
     this.watch<Category>('categories', (rows) => (this.data.categories = rows));
@@ -394,6 +452,8 @@ class Store {
     this.watch<CashClose>('cashCloses', (rows) => (this.cashCloses = rows));
     this.watch<CashRegisterSession>('cashRegisters', (rows) => (this.cashRegisters = rows));
     this.watch<TableCloseReceipt>('tableCloses', (rows) => (this.tableCloses = rows));
+    this.watch<User>('users', (rows) => (this.users = rows));
+    this.watch<Subscription>('subscriptions', (rows) => (this.subscriptions = rows));
   }
 
   // Mirrors one collection into memory and records its liveness. `assign` receives the whole
@@ -682,6 +742,149 @@ class Store {
   // Getters (synchronous — read the in-memory projection)
   public getEstablishments(): Establishment[] {
     return this.data.establishments;
+  }
+
+  public getEstablishment(id: string): Establishment | undefined {
+    return this.data.establishments.find((e) => e.id === id || e.slug === id);
+  }
+
+  public getEstablishmentBySlug(slug: string): Establishment | undefined {
+    return this.data.establishments.find((e) => e.slug === slug || e.id === slug);
+  }
+
+  public async updateEstablishment(id: string, patch: Partial<Establishment>): Promise<Establishment | undefined> {
+    const current = this.data.establishments.find((e) => e.id === id);
+    if (!current) return undefined;
+    try {
+      await adminDb.collection('establishments').doc(id).set(forFirestore(patch), { merge: true });
+    } catch (e: any) {
+      this.lastWriteError = { message: e?.message || String(e), at: Date.now() };
+      logger.error({ event: 'update_establishment_error', error: e });
+      throw e;
+    }
+    const idx = this.data.establishments.findIndex((e) => e.id === id);
+    const updated = { ...(idx !== -1 ? this.data.establishments[idx] : current), ...patch };
+    if (idx !== -1) this.data.establishments[idx] = updated;
+    this.notifyClients('MENU_CHANGED', { establishmentId: id });
+    return updated;
+  }
+
+  public getUser(id: string): User | undefined {
+    return this.users.find((u) => u.id === id);
+  }
+
+  public getUserByEmail(email: string): User | undefined {
+    return this.users.find((u) => u.email.toLowerCase() === email.trim().toLowerCase());
+  }
+
+  public getUsersByEstablishment(establishmentId: string): User[] {
+    return this.users.filter((u) => u.establishmentId === establishmentId);
+  }
+
+  public async createUser(user: User): Promise<User> {
+    try {
+      await adminDb.collection('users').doc(user.id).set(forFirestore(user));
+    } catch (e: any) {
+      this.lastWriteError = { message: e?.message || String(e), at: Date.now() };
+      logger.error({ event: 'create_user_error', error: e });
+      throw e;
+    }
+    const idx = this.users.findIndex((u) => u.id === user.id);
+    if (idx !== -1) this.users[idx] = user;
+    else this.users.push(user);
+    return user;
+  }
+
+  public async updateUser(id: string, patch: Partial<User>): Promise<User | undefined> {
+    const current = this.users.find((u) => u.id === id);
+    if (!current) return undefined;
+    try {
+      await adminDb.collection('users').doc(id).set(forFirestore(patch), { merge: true });
+    } catch (e: any) {
+      this.lastWriteError = { message: e?.message || String(e), at: Date.now() };
+      logger.error({ event: 'update_user_error', error: e });
+      throw e;
+    }
+    const idx = this.users.findIndex((u) => u.id === id);
+    const updated = { ...(idx !== -1 ? this.users[idx] : current), ...patch };
+    if (idx !== -1) this.users[idx] = updated;
+    return updated;
+  }
+
+  public async deactivateUser(id: string): Promise<boolean> {
+    const res = await this.updateUser(id, { active: false });
+    return !!res;
+  }
+
+  public getSubscription(establishmentId: string): Subscription | undefined {
+    return this.subscriptions.find((s) => s.establishmentId === establishmentId);
+  }
+
+  public async updateSubscription(establishmentId: string, patch: Partial<Subscription>): Promise<Subscription | undefined> {
+    let sub = this.subscriptions.find((s) => s.establishmentId === establishmentId);
+    if (!sub) {
+      sub = {
+        id: 'sub-' + randomUUID(),
+        establishmentId,
+        planId: 'free',
+        status: 'active',
+        currentPeriodEnd: Date.now() + 30 * 24 * 60 * 60 * 1000,
+        activatedManually: true,
+        ...patch,
+      };
+      try {
+        await adminDb.collection('subscriptions').doc(sub.id).set(forFirestore(sub));
+      } catch (e: any) {
+        this.lastWriteError = { message: e?.message || String(e), at: Date.now() };
+        logger.error({ event: 'update_subscription_error', error: e });
+        throw e;
+      }
+      this.subscriptions.push(sub);
+      return sub;
+    }
+    try {
+      await adminDb.collection('subscriptions').doc(sub.id).set(forFirestore(patch), { merge: true });
+    } catch (e: any) {
+      this.lastWriteError = { message: e?.message || String(e), at: Date.now() };
+      logger.error({ event: 'update_subscription_error', error: e });
+      throw e;
+    }
+    const idx = this.subscriptions.findIndex((s) => s.id === sub!.id);
+    const updated = { ...(idx !== -1 ? this.subscriptions[idx] : sub), ...patch };
+    if (idx !== -1) this.subscriptions[idx] = updated;
+    return updated;
+  }
+
+  public getLastWriteError() {
+    return this.lastWriteError;
+  }
+
+  public registerProvisionedTenant(payload: {
+    establishment: Establishment;
+    user: User;
+    category: Category;
+    menuItem: MenuItem;
+    table: Table;
+    subscription: Subscription;
+  }): void {
+    if (!this.data.establishments.some((e) => e.id === payload.establishment.id)) {
+      this.data.establishments.push(payload.establishment);
+    }
+    if (!this.users.some((u) => u.id === payload.user.id)) {
+      this.users.push(payload.user);
+    }
+    if (!this.data.categories.some((c) => c.id === payload.category.id)) {
+      this.data.categories.push(payload.category);
+    }
+    if (!this.data.menuItems.some((m) => m.id === payload.menuItem.id)) {
+      this.data.menuItems.push(payload.menuItem);
+    }
+    if (!this.data.tables.some((t) => t.id === payload.table.id)) {
+      this.data.tables.push(payload.table);
+    }
+    if (!this.subscriptions.some((s) => s.id === payload.subscription.id)) {
+      this.subscriptions.push(payload.subscription);
+    }
   }
 
   public getCategories(establishmentId: string): Category[] {
@@ -984,8 +1187,10 @@ class Store {
 
     try {
       await adminDb.collection('menuItems').doc(item.id).set(forFirestore(item));
-    } catch (e) {
-      console.error('[Firestore] saveMenuItem error:', e);
+    } catch (e: any) {
+      this.lastWriteError = { message: e?.message || String(e), at: Date.now() };
+      logger.error({ event: 'save_menu_item_error', error: e });
+      throw e;
     }
     // Re-locate by id after the await: the menuItems listener replaces the whole array on
     // every snapshot, so the index found above may now point at a different item.
@@ -1007,8 +1212,10 @@ class Store {
 
     try {
       await adminDb.collection('menuItems').doc(itemId).delete();
-    } catch (e) {
-      console.error('[Firestore] deleteMenuItem error:', e);
+    } catch (e: any) {
+      this.lastWriteError = { message: e?.message || String(e), at: Date.now() };
+      logger.error({ event: 'delete_menu_item_error', error: e });
+      throw e;
     }
     // Re-locate by id after the await: splicing a pre-await index would delete whichever
     // item a snapshot moved into that slot, not this one.
@@ -1034,8 +1241,10 @@ class Store {
 
     try {
       await adminDb.collection('categories').doc(category.id).set(forFirestore(category));
-    } catch (e) {
-      console.error('[Firestore] saveCategory error:', e);
+    } catch (e: any) {
+      this.lastWriteError = { message: e?.message || String(e), at: Date.now() };
+      logger.error({ event: 'save_category_error', error: e });
+      throw e;
     }
     // Re-locate by id after the await (snapshots replace the whole array).
     const index = this.data.categories.findIndex((c) => c.id === category.id);
@@ -1066,8 +1275,10 @@ class Store {
         batch.delete(adminDb.collection('menuItems').doc(m.id));
       }
       await batch.commit();
-    } catch (e) {
-      console.error('[Firestore] deleteCategory error:', e);
+    } catch (e: any) {
+      this.lastWriteError = { message: e?.message || String(e), at: Date.now() };
+      logger.error({ event: 'delete_category_error', error: e });
+      throw e;
     }
 
     // Re-locate by id after the await: splicing a pre-await index could remove a different
@@ -1095,22 +1306,29 @@ class Store {
       }
     }
 
+    const tableWithToken: Table = {
+      ...table,
+      sessionToken: table.sessionToken || randomUUID(),
+    };
+
     try {
-      await adminDb.collection('tables').doc(table.id).set(forFirestore(table));
-    } catch (e) {
-      console.error('[Firestore] saveTable error:', e);
+      await adminDb.collection('tables').doc(tableWithToken.id).set(forFirestore(tableWithToken));
+    } catch (e: any) {
+      this.lastWriteError = { message: e?.message || String(e), at: Date.now() };
+      logger.error({ event: 'save_table_error', error: e });
+      throw e;
     }
 
     // Re-locate by id after the await (snapshots replace the whole array). Looking the id
     // up again also subsumes the previous alreadyInList duplicate guard.
-    const index = this.data.tables.findIndex((t) => t.id === table.id);
+    const index = this.data.tables.findIndex((t) => t.id === tableWithToken.id);
     if (index !== -1) {
-      this.data.tables[index] = table;
+      this.data.tables[index] = tableWithToken;
     } else {
-      this.data.tables.push(table);
+      this.data.tables.push(tableWithToken);
     }
-    this.notifyClients('TABLES_CHANGED', { establishmentId: table.establishmentId });
-    return table;
+    this.notifyClients('TABLES_CHANGED', { establishmentId: tableWithToken.establishmentId });
+    return tableWithToken;
   }
 
   public async deleteTable(tableId: string, establishmentId: string): Promise<boolean> {
@@ -1121,8 +1339,10 @@ class Store {
 
     try {
       await adminDb.collection('tables').doc(tableId).delete();
-    } catch (e) {
-      console.error('[Firestore] deleteTable error:', e);
+    } catch (e: any) {
+      this.lastWriteError = { message: e?.message || String(e), at: Date.now() };
+      logger.error({ event: 'delete_table_error', error: e });
+      throw e;
     }
     // Re-locate by id after the await: splicing a pre-await index would drop whichever
     // table a snapshot moved into that slot.
@@ -1132,6 +1352,60 @@ class Store {
     if (index !== -1) this.data.tables.splice(index, 1);
     this.notifyClients('TABLES_CHANGED', { establishmentId });
     return true;
+  }
+
+  public async rotateTableToken(establishmentId: string, tableId: string): Promise<string> {
+    const table = this.data.tables.find(
+      (t) => t.id === tableId && t.establishmentId === establishmentId
+    );
+    if (!table) throw new Error('Mesa no encontrada');
+
+    const newToken = randomUUID();
+    try {
+      await adminDb.collection('tables').doc(tableId).update({ sessionToken: newToken });
+    } catch (e: any) {
+      this.lastWriteError = { message: e?.message || String(e), at: Date.now() };
+      logger.error({ event: 'rotate_table_token_error', error: e });
+      throw e;
+    }
+    const idx = this.data.tables.findIndex((t) => t.id === tableId);
+    if (idx !== -1) {
+      this.data.tables[idx] = { ...this.data.tables[idx], sessionToken: newToken };
+    }
+    this.notifyClients('TABLES_CHANGED', { establishmentId });
+    return newToken;
+  }
+
+  public async updatePayment(
+    establishmentId: string,
+    orderId: string,
+    paymentStatus: 'paid' | 'waived',
+    paymentMethod?: 'cash' | 'card' | 'transfer' | null
+  ): Promise<Order | null> {
+    const current = this.data.orders.find(
+      (o) => o.id === orderId && o.establishmentId === establishmentId
+    );
+    if (!current) return null;
+
+    const patch: Partial<Order> = {
+      paymentStatus,
+      paymentMethod: paymentMethod || null,
+      updatedAt: new Date().toISOString(),
+    };
+
+    try {
+      await adminDb.collection('orders').doc(orderId).update(forFirestore(patch));
+    } catch (e: any) {
+      this.lastWriteError = { message: e?.message || String(e), at: Date.now() };
+      logger.error({ event: 'update_payment_error', error: e });
+      throw e;
+    }
+
+    const idx = this.data.orders.findIndex((o) => o.id === orderId);
+    const updated: Order = { ...(idx !== -1 ? this.data.orders[idx] : current), ...patch };
+    if (idx !== -1) this.data.orders[idx] = updated;
+    this.notifyClients('ORDER_STATUS_CHANGED', { establishmentId, order: updated });
+    return updated;
   }
 
   // Table Calls & Notifications
@@ -1294,10 +1568,12 @@ class Store {
     const closedAt = new Date().toISOString();
     this.closedSessions.set(sessionKey, { closedAt, timestamp: Date.now() });
 
+    const newSessionToken = randomUUID();
     // Update table in-memory and in Firestore
     const updatedTable: Table = {
       ...table,
       lastClosedAt: closedAt,
+      sessionToken: newSessionToken,
       isOccupied: false,
       activeOrdersCount: 0,
     };
@@ -1305,8 +1581,9 @@ class Store {
 
     try {
       await adminDb.collection('tables').doc(table.id).set(forFirestore(updatedTable), { merge: true });
-    } catch (e) {
-      console.error('[Firestore] closeTableSession table update error:', e);
+    } catch (e: any) {
+      this.lastWriteError = { message: e?.message || String(e), at: Date.now() };
+      logger.error({ event: 'close_table_session_table_update_error', error: e });
     }
 
     // 1. Mark all active non-finalized orders for this table as 'Entregado' so they are archived as delivered sales

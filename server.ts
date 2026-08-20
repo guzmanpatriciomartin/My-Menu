@@ -6,7 +6,7 @@ import 'dotenv/config';
 // Initializes the Admin SDK and runs its boot probe (ADR-006 Paso 1). Imported before the store
 // so the credential/ADC line is the first thing in the log; the store now depends on adminDb for
 // everything, reads and listeners included.
-import { adminProbe } from './src/lib/firebase-admin';
+import { adminProbe, adminAuth } from './src/lib/firebase-admin';
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import cookieParser from 'cookie-parser';
@@ -14,11 +14,17 @@ import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
+import { randomUUID } from 'crypto';
 import { createServer as createViteServer } from 'vite';
 import { store } from './src/server/store';
 import type { CreateOrderResult, FirestoreHealth } from './src/server/store';
-import { findUserByEmail, verifyPassword, DUMMY_PASSWORD_HASH } from './src/server/users';
+import { findUserByEmail, verifyPassword, hashPassword, getUserPasswordHash, registerUserPassword, DUMMY_PASSWORD_HASH } from './src/server/users';
 import { requireAuth, requireRole, verifySession, SECRET, SESSION_COOKIE } from './src/server/auth';
+import { checkPlanLimit } from './src/server/planLimits';
+import { provisionTenant } from './src/server/provisioning';
+import { getSignedUploadUrl } from './src/server/storage';
+import { PLANS } from './src/server/plans';
+import { logger } from './src/server/logger';
 import {
   loginSchema,
   createOrderSchema,
@@ -34,6 +40,13 @@ import {
   cashCloseSchema,
   metricsQuerySchema,
   cashClosesQuerySchema,
+  createUserSchema,
+  updateUserSchema,
+  establishmentConfigSchema,
+  provisionTenantSchema,
+  updatePaymentSchema,
+  rotateTableTokenSchema,
+  changePlanSchema,
 } from './src/server/schemas';
 
 const SESSION_TTL_SECONDS = 8 * 60 * 60; // 8 hours
@@ -257,20 +270,77 @@ async function startServer() {
     }
   });
 
-  // --- Auth ---
+  // --- Auth & Provisioning ---
 
-  // Login: validate credentials, issue an 8h httpOnly session cookie.
+  // Tenant Provisioning (Register new restaurant/cafeteria tenant)
+  app.post('/api/provision', async (req, res, next) => {
+    try {
+      const body = parseBody(provisionTenantSchema, req, res);
+      if (!body) return;
+
+      // Check if user email already exists
+      const existingUser = findUserByEmail(body.email) || store.getUserByEmail(body.email);
+      if (existingUser) {
+        return res.status(409).json({ error: 'El email ya se encuentra registrado' });
+      }
+
+      const result = await provisionTenant({
+        email: body.email,
+        password: body.password,
+        establishmentName: body.establishmentName,
+        adminName: body.adminName,
+      });
+
+      // Issue session cookie immediately for newly provisioned admin
+      const token = jwt.sign(
+        {
+          sub: result.user.id,
+          email: result.user.email,
+          role: result.user.role,
+          establishmentId: result.establishment.id,
+        },
+        SECRET,
+        { expiresIn: SESSION_TTL_SECONDS }
+      );
+
+      res.cookie(SESSION_COOKIE, token, {
+        ...SESSION_COOKIE_OPTIONS,
+        maxAge: SESSION_TTL_SECONDS * 1000,
+      });
+
+      res.status(201).json({
+        user: {
+          email: result.user.email,
+          role: result.user.role,
+          establishmentId: result.establishment.id,
+          name: result.user.name,
+        },
+        establishment: result.establishment,
+        subscription: result.subscription,
+      });
+    } catch (e: any) {
+      logger.error({ event: 'provision_tenant_error', error: e });
+      next(e);
+    }
+  });
+
+  // Login: validate credentials (seed or dynamic), issue an 8h httpOnly session cookie.
   app.post('/api/auth/login', loginLimiter, (req, res, next) => {
     try {
       const body = parseBody(loginSchema, req, res);
       if (!body) return;
 
-      const user = findUserByEmail(body.email);
-      // F-8: run verifyPassword in BOTH branches (dummy hash when the user is unknown)
-      // so the response timing does not reveal whether the account exists. Same code path,
-      // same generic 401 for "unknown email" and "wrong password".
-      const hashToCheck = user ? user.passwordHash : DUMMY_PASSWORD_HASH;
-      const passwordOk = verifyPassword(body.password, hashToCheck);
+      const seedUser = findUserByEmail(body.email);
+      const storeUser = store.getUserByEmail(body.email);
+      const user = seedUser || storeUser;
+
+      // If dynamic user is deactivated, reject immediately
+      if (storeUser && storeUser.active === false) {
+        return res.status(403).json({ error: 'Usuario inactivo. Contactá al administrador.' });
+      }
+
+      const passwordHash = getUserPasswordHash(body.email) || (seedUser ? seedUser.passwordHash : DUMMY_PASSWORD_HASH);
+      const passwordOk = verifyPassword(body.password, passwordHash);
       if (!user || !passwordOk) {
         return res.status(401).json({ error: 'Credenciales inválidas' });
       }
@@ -291,8 +361,7 @@ async function startServer() {
         maxAge: SESSION_TTL_SECONDS * 1000,
       });
 
-      // F-5: respond with the session profile only. The JWT lives exclusively in the
-      // httpOnly cookie and is never exposed to JS (XSS token-theft protection).
+      // F-5: respond with the session profile only.
       res.json({
         email: user.email,
         role: user.role,
@@ -300,6 +369,56 @@ async function startServer() {
       });
     } catch (e) {
       next(e);
+    }
+  });
+
+  // Firebase Auth token exchange
+  app.post('/api/auth/firebase-login', loginLimiter, async (req, res, next) => {
+    try {
+      const { idToken } = req.body || {};
+      if (!idToken || typeof idToken !== 'string') {
+        return res.status(400).json({ error: 'idToken es requerido' });
+      }
+
+      const decoded = await adminAuth.verifyIdToken(idToken);
+      const email = decoded.email;
+      if (!email) {
+        return res.status(400).json({ error: 'Token no contiene un email válido' });
+      }
+
+      let user = store.getUserByEmail(email) || findUserByEmail(email);
+      if (!user) {
+        return res.status(404).json({ error: 'Usuario no registrado en la plataforma' });
+      }
+
+      if ('active' in user && user.active === false) {
+        return res.status(403).json({ error: 'Usuario inactivo' });
+      }
+
+      const token = jwt.sign(
+        {
+          sub: user.id,
+          email: user.email,
+          role: user.role,
+          establishmentId: user.establishmentId,
+        },
+        SECRET,
+        { expiresIn: SESSION_TTL_SECONDS }
+      );
+
+      res.cookie(SESSION_COOKIE, token, {
+        ...SESSION_COOKIE_OPTIONS,
+        maxAge: SESSION_TTL_SECONDS * 1000,
+      });
+
+      res.json({
+        email: user.email,
+        role: user.role,
+        establishmentId: user.establishmentId,
+      });
+    } catch (e: any) {
+      logger.warn({ event: 'firebase_login_error', error: e });
+      res.status(401).json({ error: 'Token de autenticación inválido o expirado' });
     }
   });
 
@@ -709,6 +828,20 @@ async function startServer() {
       if (!body) return;
 
       const estId = req.user!.establishmentId;
+
+      // Plan Limit Check for newly created items
+      const isNew = !store.getMenuItems(estId).some((m) => m.id === body.id);
+      if (isNew) {
+        try {
+          checkPlanLimit(estId, 'menuItems');
+        } catch (err: any) {
+          return res.status(403).json({
+            error: 'Límite de platos de tu plan alcanzado. Mejorá a un plan superior para agregar más platos.',
+            code: 'PLAN_LIMIT_EXCEEDED',
+          });
+        }
+      }
+
       // Build explicitly from validated fields; establishmentId forced from the session.
       const saved = await store.saveMenuItem({
         id: body.id,
@@ -776,6 +909,20 @@ async function startServer() {
       if (!body) return;
 
       const estId = req.user!.establishmentId;
+
+      // Plan Limit Check for newly created tables
+      const isNew = !store.getTables(estId).some((t) => t.id === body.id);
+      if (isNew) {
+        try {
+          checkPlanLimit(estId, 'tables');
+        } catch (err: any) {
+          return res.status(403).json({
+            error: 'Límite de mesas de tu plan alcanzado. Mejorá a un plan superior para habilitar más mesas.',
+            code: 'PLAN_LIMIT_EXCEEDED',
+          });
+        }
+      }
+
       const saved = await store.saveTable({
         id: body.id,
         establishmentId: estId,
@@ -796,6 +943,257 @@ async function startServer() {
       const ok = await store.deleteTable(req.params.id, estId);
       if (!ok) return res.status(404).json({ error: 'Table not found' });
       res.json({ success: true });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // Rotate table QR token — admin only
+  app.post('/api/tables/:id/rotate-token', requireAuth, requireRole('admin'), async (req, res, next) => {
+    try {
+      const estId = req.user!.establishmentId;
+      const newToken = await store.rotateTableToken(estId, req.params.id);
+      res.json({ success: true, sessionToken: newToken });
+    } catch (e: any) {
+      if (e?.message === 'Mesa no encontrada') {
+        return res.status(404).json({ error: 'Mesa no encontrada' });
+      }
+      next(e);
+    }
+  });
+
+  // Update order payment status (Paid / Waived)
+  app.patch('/api/orders/:id/payment', requireAuth, async (req, res, next) => {
+    try {
+      const body = parseBody(updatePaymentSchema, req, res);
+      if (!body) return;
+
+      const updated = await store.updatePayment(
+        req.user!.establishmentId,
+        req.params.id,
+        body.paymentStatus,
+        body.paymentMethod
+      );
+
+      if (!updated) return res.status(404).json({ error: 'Pedido no encontrado' });
+      res.json(updated);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // --- Users Management (Admin only) ---
+  app.get('/api/my/users', requireAuth, requireRole('admin'), (req, res, next) => {
+    try {
+      const users = store.getUsersByEstablishment(req.user!.establishmentId);
+      // Clean up sensitive fields before sending
+      const sanitized = users.map((u) => ({
+        id: u.id,
+        establishmentId: u.establishmentId,
+        email: u.email,
+        role: u.role,
+        name: u.name,
+        active: u.active,
+        createdAt: u.createdAt,
+      }));
+      res.json(sanitized);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.post('/api/my/users', requireAuth, requireRole('admin'), async (req, res, next) => {
+    try {
+      const estId = req.user!.establishmentId;
+      const body = parseBody(createUserSchema, req, res);
+      if (!body) return;
+
+      // Plan Limit Check for team members
+      try {
+        checkPlanLimit(estId, 'users');
+      } catch (err: any) {
+        return res.status(403).json({
+          error: 'Límite de usuarios de tu plan alcanzado. Mejorá a un plan superior para sumar más colaboradores.',
+          code: 'PLAN_LIMIT_EXCEEDED',
+        });
+      }
+
+      // Check if email already in use
+      const existing = findUserByEmail(body.email) || store.getUserByEmail(body.email);
+      if (existing) {
+        return res.status(409).json({ error: 'El email ya se encuentra registrado' });
+      }
+
+      let uid = 'usr-' + randomUUID();
+      try {
+        const fbUser = await adminAuth.createUser({
+          email: body.email.trim().toLowerCase(),
+          password: body.password,
+          displayName: body.name,
+        });
+        uid = fbUser.uid;
+      } catch (e) {
+        logger.warn({ event: 'create_user_firebase_fallback', error: e });
+      }
+
+      // Hash password and store for login
+      const pHash = hashPassword(body.password);
+      registerUserPassword(body.email, pHash);
+
+      const newUser = await store.createUser({
+        id: uid,
+        establishmentId: estId,
+        email: body.email.trim().toLowerCase(),
+        role: body.role,
+        name: body.name,
+        active: true,
+        createdAt: Date.now(),
+      });
+
+      res.status(201).json({
+        id: newUser.id,
+        establishmentId: newUser.establishmentId,
+        email: newUser.email,
+        role: newUser.role,
+        name: newUser.name,
+        active: newUser.active,
+        createdAt: newUser.createdAt,
+      });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.patch('/api/my/users/:id', requireAuth, requireRole('admin'), async (req, res, next) => {
+    try {
+      const estId = req.user!.establishmentId;
+      const targetUser = store.getUser(req.params.id);
+      if (!targetUser || targetUser.establishmentId !== estId) {
+        return res.status(404).json({ error: 'Usuario no encontrado' });
+      }
+
+      const body = parseBody(updateUserSchema, req, res);
+      if (!body) return;
+
+      if (body.password) {
+        const pHash = hashPassword(body.password);
+        registerUserPassword(targetUser.email, pHash);
+        try {
+          await adminAuth.updateUser(targetUser.id, { password: body.password });
+        } catch (e) {
+          logger.warn({ event: 'update_user_password_firebase_fallback', error: e });
+        }
+      }
+
+      const patchData: any = {};
+      if (body.name !== undefined) patchData.name = body.name;
+      if (body.role !== undefined) patchData.role = body.role;
+      if (body.active !== undefined) patchData.active = body.active;
+
+      const updated = await store.updateUser(targetUser.id, patchData);
+      res.json(updated);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  app.delete('/api/my/users/:id', requireAuth, requireRole('admin'), async (req, res, next) => {
+    try {
+      const estId = req.user!.establishmentId;
+      const targetUser = store.getUser(req.params.id);
+      if (!targetUser || targetUser.establishmentId !== estId) {
+        return res.status(404).json({ error: 'Usuario no encontrado' });
+      }
+
+      if (targetUser.email === req.user!.email) {
+        return res.status(400).json({ error: 'No podés desactivar tu propio usuario administrador' });
+      }
+
+      await store.deactivateUser(targetUser.id);
+      res.json({ success: true, message: 'Usuario desactivado' });
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // --- Subscription & Plans ---
+  app.get('/api/plans', (_req, res) => {
+    res.json(Object.values(PLANS));
+  });
+
+  app.get('/api/my/subscription', requireAuth, requireRole('admin'), (req, res) => {
+    const estId = req.user!.establishmentId;
+    const sub = store.getSubscription(estId) || {
+      id: 'sub-default',
+      establishmentId: estId,
+      planId: 'free',
+      status: 'active',
+      currentPeriodEnd: Date.now() + 365 * 24 * 60 * 60 * 1000,
+    };
+    const plan = PLANS[sub.planId] || PLANS.free;
+
+    const tablesCount = store.getTables(estId).filter((t) => t.active).length;
+    const menuItemsCount = store.getMenuItems(estId).length;
+    const usersCount = store.getUsersByEstablishment(estId).filter((u) => u.active).length;
+
+    res.json({
+      subscription: sub,
+      plan,
+      usage: {
+        tables: { current: tablesCount, max: plan.maxTables },
+        menuItems: { current: menuItemsCount, max: plan.maxMenuItems },
+        users: { current: usersCount, max: plan.maxUsers },
+      },
+    });
+  });
+
+  app.post('/api/my/subscription/plan', requireAuth, requireRole('admin'), async (req, res, next) => {
+    try {
+      const body = parseBody(changePlanSchema, req, res);
+      if (!body) return;
+
+      const estId = req.user!.establishmentId;
+      const updated = await store.updateSubscription(estId, {
+        planId: body.planId,
+        status: 'active',
+        currentPeriodEnd: Date.now() + 30 * 24 * 60 * 60 * 1000,
+      });
+
+      res.json(updated);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // --- Establishment Configuration ---
+  app.patch('/api/my/establishment', requireAuth, requireRole('admin'), async (req, res, next) => {
+    try {
+      const body = parseBody(establishmentConfigSchema, req, res);
+      if (!body) return;
+
+      const estId = req.user!.establishmentId;
+      const updated = await store.updateEstablishment(estId, body);
+      if (!updated) return res.status(404).json({ error: 'Establecimiento no encontrado' });
+      res.json(updated);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  // --- Storage Upload URL Generation ---
+  app.post('/api/my/storage/upload-url', requireAuth, requireRole('admin'), async (req, res, next) => {
+    try {
+      const { filename, contentType } = req.body || {};
+      if (!filename || typeof filename !== 'string') {
+        return res.status(400).json({ error: 'Nombre de archivo requerido' });
+      }
+
+      const result = await getSignedUploadUrl(
+        req.user!.establishmentId,
+        filename,
+        contentType || 'image/jpeg'
+      );
+      res.json(result);
     } catch (e) {
       next(e);
     }

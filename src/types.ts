@@ -1,9 +1,41 @@
 export interface Establishment {
   id: string;
   name: string;
+  slug: string;
   description: string;
   accentColor: string;
-  logoUrl?: string;
+  logoUrl?: string | null;
+  openingHours?: string;
+  contactPhone?: string;
+  kitchenToken?: string | null;
+}
+
+export interface User {
+  id: string; // Firebase UID
+  establishmentId: string;
+  email: string;
+  role: 'admin' | 'waiter';
+  name: string;
+  active: boolean;
+  createdAt: number;
+}
+
+export interface Plan {
+  id: 'free' | 'pro';
+  name: string;
+  maxTables: number;    // -1 = sin límite
+  maxMenuItems: number;
+  maxUsers: number;
+  priceARS: number;
+}
+
+export interface Subscription {
+  id: string;
+  establishmentId: string;
+  planId: 'free' | 'pro';
+  status: 'trialing' | 'active' | 'suspended';
+  currentPeriodEnd: number;
+  activatedManually: boolean;
 }
 
 export interface Category {
@@ -29,6 +61,8 @@ export interface Table {
   establishmentId: string;
   name: string;
   active: boolean;
+  sessionToken?: string;
+  capacity?: number;
   qrUrl?: string;
   isOccupied?: boolean;
   activeOrdersCount?: number;
@@ -57,8 +91,8 @@ export interface Order {
   cancellationReason?: string;
   createdAt: string;
   updatedAt: string;
-  // 'pending' reservado para v1.1 — actualmente los pedidos se crean con null y se pagan directamente
-  paymentStatus: 'pending' | 'paid' | null;
+  paymentStatus: 'pending' | 'paid' | 'waived' | null;
+  paymentMethod?: 'cash' | 'card' | 'transfer' | null;
   deliveredAt?: string;
   cashCloseId?: string | null;
 }

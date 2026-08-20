@@ -256,4 +256,66 @@ function reportProbeFailure(detail: string): boolean {
   return false;
 }
 
+import { getApps as getAdminApps, initializeApp as initializeAdminApp, cert, App as AdminApp } from 'firebase-admin/app';
+import { getAuth, CreateRequest, UpdateRequest } from 'firebase-admin/auth';
+import * as fs from 'fs';
+import * as path from 'path';
+
+let adminAppInstance: AdminApp | null = null;
+
+export function getAdminApp(): AdminApp {
+  if (adminAppInstance) return adminAppInstance;
+  const apps = getAdminApps();
+  if (apps.length > 0 && apps[0]) {
+    adminAppInstance = apps[0];
+    return adminAppInstance;
+  }
+
+  const serviceAccountPath = path.join(process.cwd(), 'firebase-service-account.json');
+  if (fs.existsSync(serviceAccountPath)) {
+    try {
+      const sa = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
+      adminAppInstance = initializeAdminApp({
+        credential: cert(sa),
+        projectId: sa.project_id || appletConfig.projectId,
+      });
+      return adminAppInstance;
+    } catch (e) {
+      console.warn('[Firebase Admin] Error loading service account:', e);
+    }
+  }
+
+  adminAppInstance = initializeAdminApp({
+    projectId: appletConfig.projectId,
+  });
+  return adminAppInstance;
+}
+
+export const adminAuth = {
+  async verifyIdToken(idToken: string) {
+    const auth = getAuth(getAdminApp());
+    return auth.verifyIdToken(idToken);
+  },
+  async createUser(properties: CreateRequest) {
+    const auth = getAuth(getAdminApp());
+    return auth.createUser(properties);
+  },
+  async updateUser(uid: string, properties: UpdateRequest) {
+    const auth = getAuth(getAdminApp());
+    return auth.updateUser(uid, properties);
+  },
+  async deleteUser(uid: string) {
+    const auth = getAuth(getAdminApp());
+    return auth.deleteUser(uid);
+  },
+  async getUser(uid: string) {
+    const auth = getAuth(getAdminApp());
+    return auth.getUser(uid);
+  },
+  async getUserByEmail(email: string) {
+    const auth = getAuth(getAdminApp());
+    return auth.getUserByEmail(email);
+  }
+};
+
 export const adminProbe: Promise<boolean> = runProbe();

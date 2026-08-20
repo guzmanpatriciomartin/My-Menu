@@ -16,14 +16,18 @@ export const initialEstablishments: Establishment[] = [
   {
     id: 'bodegon-palermo',
     name: 'El Bodegón de Palermo',
+    slug: 'bodegon-palermo',
     description: 'Bodegón tradicional porteño. Comidas abundantes, caseras y un ambiente cálido para compartir en familia o con amigos.',
     accentColor: '#9a1c1c', // Rust Red
+    kitchenToken: 'kt-bodegon-palermo-secret',
   },
   {
     id: 'cafe-speakeasy',
     name: 'Café & Co. Speakeasy',
+    slug: 'cafe-speakeasy',
     description: 'Espacio de café de especialidad de día y bar oculto de tragos de autor de noche. Estilo minimalista y moderno.',
     accentColor: '#1d4ed8', // Royal Blue
+    kitchenToken: 'kt-cafe-speakeasy-secret',
   }
 ];
 
@@ -209,19 +213,19 @@ export const initialMenuItems: MenuItem[] = [
 
 export const initialTables: Table[] = [
   // Bodegón Palermo
-  { id: 'tab-pal-1', establishmentId: 'bodegon-palermo', name: 'Mesa 1', active: true },
-  { id: 'tab-pal-2', establishmentId: 'bodegon-palermo', name: 'Mesa 2', active: true },
-  { id: 'tab-pal-3', establishmentId: 'bodegon-palermo', name: 'Mesa 3', active: true },
-  { id: 'tab-pal-4', establishmentId: 'bodegon-palermo', name: 'Mesa 4', active: true },
-  { id: 'tab-pal-5', establishmentId: 'bodegon-palermo', name: 'Mesa 5', active: true },
-  { id: 'tab-pal-sub', establishmentId: 'bodegon-palermo', name: 'Mesa Barra 1', active: true },
-  { id: 'tab-pal-out', establishmentId: 'bodegon-palermo', name: 'Mesa Exterior 9', active: false },
+  { id: 'tab-pal-1', establishmentId: 'bodegon-palermo', name: 'Mesa 1', active: true, sessionToken: 'st-pal-1' },
+  { id: 'tab-pal-2', establishmentId: 'bodegon-palermo', name: 'Mesa 2', active: true, sessionToken: 'st-pal-2' },
+  { id: 'tab-pal-3', establishmentId: 'bodegon-palermo', name: 'Mesa 3', active: true, sessionToken: 'st-pal-3' },
+  { id: 'tab-pal-4', establishmentId: 'bodegon-palermo', name: 'Mesa 4', active: true, sessionToken: 'st-pal-4' },
+  { id: 'tab-pal-5', establishmentId: 'bodegon-palermo', name: 'Mesa 5', active: true, sessionToken: 'st-pal-5' },
+  { id: 'tab-pal-sub', establishmentId: 'bodegon-palermo', name: 'Mesa Barra 1', active: true, sessionToken: 'st-pal-sub' },
+  { id: 'tab-pal-out', establishmentId: 'bodegon-palermo', name: 'Mesa Exterior 9', active: false, sessionToken: 'st-pal-out' },
 
   // Café & Co. Speakeasy
-  { id: 'tab-caf-1', establishmentId: 'cafe-speakeasy', name: 'Mesa A1', active: true },
-  { id: 'tab-caf-2', establishmentId: 'cafe-speakeasy', name: 'Mesa A2', active: true },
-  { id: 'tab-caf-3', establishmentId: 'cafe-speakeasy', name: 'Mesa de Ventana', active: true },
-  { id: 'tab-caf-4', establishmentId: 'cafe-speakeasy', name: 'Sillón Comedor', active: true },
+  { id: 'tab-caf-1', establishmentId: 'cafe-speakeasy', name: 'Mesa A1', active: true, sessionToken: 'st-caf-1' },
+  { id: 'tab-caf-2', establishmentId: 'cafe-speakeasy', name: 'Mesa A2', active: true, sessionToken: 'st-caf-2' },
+  { id: 'tab-caf-3', establishmentId: 'cafe-speakeasy', name: 'Mesa de Ventana', active: true, sessionToken: 'st-caf-3' },
+  { id: 'tab-caf-4', establishmentId: 'cafe-speakeasy', name: 'Sillón Comedor', active: true, sessionToken: 'st-caf-4' },
 ];
 
 /**

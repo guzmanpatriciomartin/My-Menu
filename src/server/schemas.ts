@@ -15,6 +15,130 @@ export const loginSchema = z
   .strict();
 export type LoginInput = z.infer<typeof loginSchema>;
 
+export const firebaseLoginSchema = z
+  .object({
+    idToken: z.string().min(1),
+  })
+  .strict();
+export type FirebaseLoginInput = z.infer<typeof firebaseLoginSchema>;
+
+export const registerSchema = z
+  .object({
+    idToken: z.string().min(1),
+    establishmentName: z.string().trim().min(2).max(60),
+  })
+  .strict();
+export type RegisterInput = z.infer<typeof registerSchema>;
+
+// --- Users (Staff management) ---
+export const userSchema = z
+  .object({
+    id: nonEmpty,
+    establishmentId: nonEmpty,
+    email: z.string().email().max(200),
+    role: z.enum(['admin', 'waiter']),
+    name: nonEmpty.max(100),
+    active: z.boolean().default(true),
+    createdAt: z.number(),
+  })
+  .strict();
+export type UserDocument = z.infer<typeof userSchema>;
+
+export const createUserSchema = z
+  .object({
+    email: z.string().email().max(200),
+    name: z.string().trim().min(1).max(50),
+    role: z.enum(['admin', 'waiter']),
+    password: z.string().min(6).max(100),
+  })
+  .strict();
+export type CreateUserInput = z.infer<typeof createUserSchema>;
+
+export const updateUserSchema = z
+  .object({
+    name: z.string().trim().min(1).max(50).optional(),
+    role: z.enum(['admin', 'waiter']).optional(),
+    active: z.boolean().optional(),
+    password: z.string().min(6).max(100).optional(),
+  })
+  .strict()
+  .refine(
+    (data) => data.name !== undefined || data.role !== undefined || data.active !== undefined || data.password !== undefined,
+    { message: 'Al menos un campo es requerido para actualizar el usuario' }
+  );
+export type UpdateUserInput = z.infer<typeof updateUserSchema>;
+
+export const provisionTenantSchema = z
+  .object({
+    email: z.string().email().max(200),
+    password: z.string().min(6).max(100),
+    establishmentName: z.string().trim().min(2).max(60),
+    adminName: z.string().trim().min(1).max(50).optional(),
+  })
+  .strict();
+export type ProvisionTenantInput = z.infer<typeof provisionTenantSchema>;
+
+export const changePlanSchema = z
+  .object({
+    planId: z.enum(['free', 'pro']),
+  })
+  .strict();
+export type ChangePlanInput = z.infer<typeof changePlanSchema>;
+
+export const rotateTableTokenSchema = z
+  .object({})
+  .strict();
+
+// --- Establishment Configuration ---
+export const updateEstablishmentSchema = z
+  .object({
+    name: z.string().trim().min(2).max(60).optional(),
+    description: z.string().max(300).optional(),
+    accentColor: z
+      .string()
+      .regex(/^#[0-9a-fA-F]{6}$/, 'Color hexadecimal inválido (ej: #f97316)')
+      .optional(),
+    logoUrl: z.string().max(2000).nullable().optional(),
+    slug: z
+      .string()
+      .min(2)
+      .max(40)
+      .regex(/^[a-z0-9-]+$/, 'El slug solo puede contener minúsculas, números y guiones')
+      .optional(),
+    openingHours: z.string().max(100).optional(),
+    contactPhone: z.string().max(20).optional(),
+  })
+  .strict();
+export type UpdateEstablishmentInput = z.infer<typeof updateEstablishmentSchema>;
+export const establishmentConfigSchema = updateEstablishmentSchema;
+export type EstablishmentConfigInput = UpdateEstablishmentInput;
+
+// --- Payment Schema ---
+export const updatePaymentSchema = z
+  .object({
+    paymentStatus: z.enum(['paid', 'waived']),
+    paymentMethod: z.enum(['cash', 'card', 'transfer']).optional(),
+  })
+  .strict()
+  .refine(
+    (data) => data.paymentStatus !== 'paid' || !!data.paymentMethod,
+    { message: 'El medio de pago es requerido si el pedido está marcado como cobrado' }
+  );
+export type UpdatePaymentInput = z.infer<typeof updatePaymentSchema>;
+
+// --- Uploads Signed URL Schema ---
+export const signedUrlSchema = z
+  .object({
+    filename: z
+      .string()
+      .min(1)
+      .max(100)
+      .regex(/^[a-zA-Z0-9._-]+$/, 'Nombre de archivo inválido'),
+    contentType: z.string().regex(/^image\//, 'El contenido debe ser una imagen'),
+  })
+  .strict();
+export type SignedUrlInput = z.infer<typeof signedUrlSchema>;
+
 // --- Orders (diner) ---
 // The client only supplies menuItemId + quantity + optional comment. name/price are
 // recomputed server-side from the catalog (ALTO-2), so they are NOT accepted here.

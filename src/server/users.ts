@@ -85,3 +85,17 @@ export function findUserByEmail(email: string): ServerUser | undefined {
   const normalized = email.trim().toLowerCase();
   return seedUsers.find((u) => u.email.toLowerCase() === normalized);
 }
+
+const dynamicCredentials = new Map<string, string>(); // email (lowercased) -> passwordHash
+
+export function registerUserPassword(email: string, passwordHash: string): void {
+  dynamicCredentials.set(email.trim().toLowerCase(), passwordHash);
+}
+
+export function getUserPasswordHash(email: string): string | undefined {
+  const norm = email.trim().toLowerCase();
+  const dynamic = dynamicCredentials.get(norm);
+  if (dynamic) return dynamic;
+  const seed = seedUsers.find((u) => u.email.toLowerCase() === norm);
+  return seed?.passwordHash;
+}
