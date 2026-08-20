@@ -47,10 +47,20 @@ interface SessionClaims {
 // responding. Used by endpoints that must serve both authenticated and anonymous
 // callers (e.g. the /api/realtime SSE stream, where a diner is valid without a cookie).
 //
-// The web frontend authenticates ONLY via the httpOnly session cookie — the token is
-// never returned to the browser (XSS token-theft protection). The Authorization: Bearer
-// path exists purely for external/programmatic API clients that obtain a token by other
-// means; it must NOT be used from the web frontend.
+// The web frontend authenticates ONLY via the httpOnly session cookie (F-5). Two reasons,
+// and neither is "this protects the session from XSS" — that claim used to be written here
+// and it over-stated what the cookie buys: LoginPage signs in with the Firebase client SDK,
+// so the browser already holds an ID token and a refresh token in IndexedDB, readable by JS.
+// An XSS does not need to steal this JWT; it can mint a fresh Firebase token, trade it at
+// /api/auth/firebase-login, or just issue same-origin fetches with credentials included.
+// The real reasons to keep the cookie are:
+//   1. EventSource cannot set headers, so the cookie is what makes /api/realtime work at all.
+//      Moving to Bearer would mean a token in the query string (and thus in Cloud Run request
+//      logs) or reimplementing the SSE client over fetch + ReadableStream.
+//   2. It adds no NEW exfiltratable credential beyond the Firebase tokens already present.
+// See ADR-007 — SameSite=Lax on that cookie is also the project's only CSRF defense.
+// The Authorization: Bearer path exists purely for external/programmatic API clients that
+// obtain a token by other means; it must NOT be used from the web frontend.
 export function verifySession(req: Request): AuthUser | null {
   let token = req.cookies?.[SESSION_COOKIE];
 

@@ -22,6 +22,39 @@ export default function LoginPage({ onLoginSuccess, onGoToRegister }: LoginPageP
   const [needsVenue, setNeedsVenue] = useState(false);
   const [venueName, setVenueName] = useState('');
 
+  // Shared by both auth paths: a 200 login does not guarantee a usable session.
+  async function finishLogin(): Promise<boolean> {
+    // The cookie is httpOnly + SameSite=lax, so an embedded/proxied context or a mismatched
+    // host silently drops it. Without this check the panel mounts, its own /api/auth/me
+    // returns 401, and the user is bounced back here with no explanation — indistinguishable
+    // from a wrong password.
+    const check = await fetch('/api/auth/me', { credentials: 'include' });
+    if (!check.ok) {
+      setError(
+        'Tus credenciales son correctas, pero el navegador no guardó la cookie de sesión. ' +
+        'Abrí la app directamente en una pestaña (no dentro de un iframe o vista previa embebida).'
+      );
+      return false;
+    }
+    onLoginSuccess();
+    return true;
+  }
+
+  // The seed users in src/server/users.ts exist only as scrypt credentials — they were never
+  // created in Firebase Auth, so signInWithEmailAndPassword rejects them. They are still the
+  // documented way into the demo tenants, so fall back to the legacy endpoint rather than
+  // telling the user their password is wrong.
+  async function tryLegacyLogin(): Promise<boolean> {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ email, password }),
+    });
+    if (!res.ok) return false;
+    return finishLogin();
+  }
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError('');
@@ -49,28 +82,22 @@ export default function LoginPage({ onLoginSuccess, onGoToRegister }: LoginPageP
         return;
       }
 
-      // The login can succeed and the session still not stick: the cookie is httpOnly +
-      // SameSite=lax, so an embedded/proxied context or a mismatched host silently drops it.
-      // Without this check the panel mounts, its own /api/auth/me returns 401, and the user
-      // is bounced back here with no explanation — indistinguishable from a wrong password.
-      const check = await fetch('/api/auth/me', { credentials: 'include' });
-      if (!check.ok) {
-        setError(
-          'Tus credenciales son correctas, pero el navegador no guardó la cookie de sesión. ' +
-          'Abrí la app directamente en una pestaña (no dentro de un iframe o vista previa embebida).'
-        );
-        return;
-      }
-
-      onLoginSuccess();
+      await finishLogin();
     } catch (err: any) {
       const code: string = err?.code ?? '';
-      if (
+      const rejected =
         code === 'auth/user-not-found' ||
         code === 'auth/wrong-password' ||
         code === 'auth/invalid-credential' ||
-        code === 'auth/invalid-email'
-      ) {
+        code === 'auth/invalid-email';
+
+      if (rejected) {
+        // Firebase does not know this account; it may still be a scrypt-only seed user.
+        try {
+          if (await tryLegacyLogin()) return;
+        } catch {
+          // fall through to the generic message below
+        }
         setError('Email o contraseña incorrectos');
       } else {
         setError('Ocurrió un error. Intentá de nuevo.');
