@@ -16,7 +16,6 @@ import {
   Bell, 
   AlertTriangle, 
   Eye, 
-  TrendingUp, 
   Layers, 
   Search, 
   Download, 
@@ -102,7 +101,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   // Active states
   const [loading, setLoading] = useState(true);
   const [soundEnabled, setSoundEnabled] = useState(true);
-  const [activeTab, setActiveTab] = useState<'monitor' | 'pos' | 'pedidos' | 'diseño_mesas' | 'caja' | 'menu_items' | 'metricas' | 'historial'>('monitor');
+  const [activeTab, setActiveTab] = useState<'monitor' | 'pos' | 'pedidos' | 'diseño_mesas' | 'caja' | 'menu_items' | 'metricas'>('monitor');
 
   // Cash close & open (ADR-005). Preview is what the shift has pending right now; closes is the
   // history. Both are available to waiters — closing the register is shift work.
@@ -158,7 +157,6 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   // Filters
   const [menuSearch, setMenuSearch] = useState('');
   const [menuCatFilter, setMenuCatFilter] = useState('all');
-  const [historyTableFilter, setHistoryTableFilter] = useState('all');
 
   // Store pre-played order and call count to detect new events and synthesize chime
   const orderCountRef = useRef<number>(0);
@@ -764,24 +762,6 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     return tableCalls.filter(c => c.status === 'pending');
   }, [tableCalls]);
 
-  const historyOrdersList = useMemo(() => {
-    let list = orders.filter(o => o.status === 'Entregado' || o.status === 'Cancelado');
-    if (historyTableFilter !== 'all') {
-      list = list.filter(o => o.tableId === historyTableFilter);
-    }
-    // Sort reverse chronological
-    return list.sort((a,b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-  }, [orders, historyTableFilter]);
-
-  // Calculate earnings of delivered orders (RF-A12)
-  const totalDayRevenue = useMemo(() => {
-    const delivered = orders.filter(o => o.status === 'Entregado');
-    return delivered.reduce((sum, ord) => {
-      const ordTotal = ord.items.reduce((itemSum, item) => itemSum + (item.price * item.quantity), 0);
-      return sum + ordTotal;
-    }, 0);
-  }, [orders]);
-
   // Waiting elapsed timer helper
   const getWaitingTime = (createdAt: string) => {
     const elapsedMs = Date.now() - new Date(createdAt).getTime();
@@ -1386,18 +1366,6 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               <p className={`text-[9px] ${classes.textMuted} font-medium`}>Catálogo y métricas bloqueados</p>
             </div>
           )}
-
-          <button
-            id="tab-btn-historial"
-            onClick={() => setActiveTab('historial')}
-            className={`px-4 py-3 ${classes.radiusBtn} text-[11px] font-black font-sans uppercase tracking-widest text-left flex items-center transition min-w-[124px] md:w-full shrink-0 border ${
-              activeTab === 'historial' 
-                ? `${classes.primaryBtn} border-current shadow-md`: `${classes.textMuted} border-transparent bg-transparent hover:${classes.textPrimary} hover:${classes.borderCard}`
-            }`}
-          >
-            <TrendingUp className={`w-4 h-4 mr-2.5 ${activeTab === 'historial' ? 'text-inherit' : primaryColorConfig.textAccent}`} />
-            Historial de Cierre
-          </button>
 
           <button
             id="tab-btn-launcher"
@@ -2431,93 +2399,6 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               loading={metricsLoading}
               formatPrice={formatPrice}
             />
-          )}
-
-          {activeTab === 'historial' && (
-            <div className="space-y-6">
-              
-              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-5 flex flex-wrap items-center justify-between gap-4`}>
-                <div className="space-y-1 my-0.5">
-                  <h2 className={`text-sm font-black uppercase ${classes.textPrimary} tracking-widest`}>Historial de Turno & Cierre</h2>
-                  <p className={`text-xs ${classes.textMuted} font-medium`}>Revisa las finanzas e historial del día. En el MVP, los montos representan el total estimado de comandas entregadas.</p>
-                </div>
-
-                <div className={`flex flex-col ${classes.inputBg} px-4 py-2 border ${classes.borderCard} ${classes.radiusCard} font-mono text-left`}>
-                  <span className={`text-[9px] ${classes.textMuted} font-mono block font-black uppercase tracking-widest`}>Recaudación Estimada</span>
-                  <span id="revenue-indicator" className="text-md font-black text-amber-500 mt-0.5">{formatPrice(totalDayRevenue)}</span>
-                </div>
-              </div>
-
-              {/* Day orders list of deliveries and cancellations */}
-              <div className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} overflow-hidden shadow`}>
-                <div className={`p-4 ${classes.bgHeader} border-b ${classes.borderCard} flex items-center justify-between font-mono text-[9px] ${classes.textMuted} tracking-widest uppercase`}>
-                  <span>PEDIDOS ARCHIVADOS ({historyOrdersList.length})</span>
-                  
-                  <div className="flex items-center gap-2">
-                    <span>Mesa:</span>
-                    <select
-                      id="history-table-filter font-mono"
-                      value={historyTableFilter}
-                      onChange={(e) => setHistoryTableFilter(e.target.value)}
-                      className={`${classes.inputBg} border ${classes.inputBorder} text-[9px] px-2 py-1 ${classes.radiusCard} ${classes.textPrimary} focus:outline-none font-mono`}
-                    >
-                      <option value="all">Todas</option>
-                      {tables.map(t => (
-                        <option key={t.id} value={t.id}>{t.name}</option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-
-                <div className={`divide-y ${classes.borderCard}`}>
-                  {historyOrdersList.map((ord) => {
-                    const ordTotal = ord.items.reduce((sum, item) => sum + (item.price * item.quantity), 0);
-                    const localTime = new Date(ord.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                    
-                    return (
-                      <div id={`history-row-${ord.id}`} key={ord.id} className={`p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 hover:${classes.bgCardHover} transition`}>
-                        <div className="space-y-1">
-                          <div className="flex items-center space-x-2">
-                            <span className={`font-bold text-xs ${classes.textPrimary}`}>{ord.tableName}</span>
-                            <span className={`text-[10px] ${classes.textMuted} font-mono`}>({localTime})</span>
-                          </div>
-                          <div className={`text-xs ${classes.textSecondary} space-y-0.5`}>
-                            {ord.items.map((i, iIdx) => (
-                              <div key={i.id || iIdx}>
-                                <span>{i.quantity}x {i.name}</span>
-                                {i.comment && (
-                                  <span className="text-[10px] text-amber-500 italic ml-2">("{i.comment}")</span>
-                                )}
-                              </div>
-                            ))}
-                          </div>
-                          {ord.status === 'Cancelado' && ord.cancellationReason && (
-                            <p className="text-[10px] text-rose-400 font-mono italic">
-                              Motivo cancelación: "{ord.cancellationReason}"
-                            </p>
-                          )}
-                        </div>
-
-                        <div className="flex items-center gap-3.5 self-end sm:self-auto font-mono text-xs">
-                          <span className={`font-black ${classes.textPrimary}`}>{formatPrice(ordTotal)}</span>
-                          <span className={`px-2.5 py-1 ${classes.radiusPill} text-[9px] font-mono font-black uppercase border ${
-                            ord.status === 'Entregado' 
-                              ? `${classes.bgCard} ${classes.textMuted} border ${classes.borderCard}` 
-                              : 'bg-rose-950/20 text-rose-400 border border-rose-950'
-                          }`}>
-                            {ord.status}
-                          </span>
-                        </div>
-                      </div>
-                    );
-                  })}
-
-                  {historyOrdersList.length === 0 && (
-                    <p className={`text-center py-12 ${classes.textMuted} italic text-xs leading-none`}>Ningún pedido cerrado aún en este turno.</p>
-                  )}
-                </div>
-              </div>
-            </div>
           )}
 
         </main>
