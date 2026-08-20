@@ -523,23 +523,50 @@ async function startServer() {
   });
 
   // Get establishments — protected: only the caller's own tenant (array of 1).
+  // kitchenToken is withheld from waiters: it is meant to gate the kitchen display, and
+  // AdminView pulls this response into the browser, so a waiter would find it in devtools.
+  // Nothing consumes the token yet; restricting it now means the kitchen display cannot
+  // ship with the bypass already in place.
   app.get('/api/establishments', requireAuth, (req, res, next) => {
     try {
+      const isAdmin = req.user!.role === 'admin';
       const own = store
         .getEstablishments()
-        .filter((e) => e.id === req.user!.establishmentId);
+        .filter((e) => e.id === req.user!.establishmentId)
+        .map((e) => {
+          if (isAdmin) return e;
+          const { kitchenToken, ...rest } = e;
+          return rest;
+        });
       res.json(own);
     } catch (e) {
       next(e);
     }
   });
 
+  // Public (diner scans a QR). Returns an explicit ALLOWLIST, never the raw document: the
+  // establishmentId travels in the QR URL printed on every table, so anything returned here
+  // is effectively published. Sending the document as-is leaked `kitchenToken` — the secret
+  // that is meant to gate the kitchen display — to anyone who scanned a table.
+  // Allowlist, not a delete: a blocklist silently republishes every field added later.
   app.get('/api/establishments/:id', (req, res, next) => {
     try {
       const list = store.getEstablishments();
       const item = list.find((e) => e.id === req.params.id);
       if (!item) return res.status(404).json({ error: 'Establishment not found' });
-      res.json(item);
+      // Only what the diner view actually renders. `slug`, `openingHours` and `contactPhone`
+      // are deliberately absent: nothing consumes them, and this endpoint is enumerable
+      // (600 req/min per IP, no auth, and the 404 body distinguishes existing from missing),
+      // so including them would just hand out venue phone numbers and the exact slug string.
+      // Add a field here only when the diner view starts showing it.
+      res.json({
+        id: item.id,
+        name: item.name,
+        description: item.description,
+        accentColor: item.accentColor,
+        logoUrl: item.logoUrl ?? null,
+        theme: item.theme ?? null,
+      });
     } catch (e) {
       next(e);
     }

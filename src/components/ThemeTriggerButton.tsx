@@ -1,14 +1,17 @@
 import React, { useState } from 'react';
 import { Settings } from 'lucide-react';
+import { EstablishmentTheme } from '../types';
 import { useTheme } from '../theme/ThemeContext';
 import ThemeSelectorModal from './ThemeSelectorModal';
 
 interface ThemeTriggerButtonProps {
   className?: string;
   variant?: 'floating' | 'inline';
+  // Forwarded straight to the modal: the trigger has no opinion on who may persist.
+  onPersist?: (theme: EstablishmentTheme) => Promise<boolean>;
 }
 
-export default function ThemeTriggerButton({ className = '', variant = 'floating' }: ThemeTriggerButtonProps) {
+export default function ThemeTriggerButton({ className = '', variant = 'floating', onPersist }: ThemeTriggerButtonProps) {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const { classes } = useTheme();
 
@@ -26,7 +29,7 @@ export default function ThemeTriggerButton({ className = '', variant = 'floating
           <span>Editar estilo</span>
         </button>
 
-        <ThemeSelectorModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} />
+        <ThemeSelectorModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} onPersist={onPersist} />
       </>
     );
   }
@@ -48,7 +51,7 @@ export default function ThemeTriggerButton({ className = '', variant = 'floating
         </button>
       </div>
 
-      <ThemeSelectorModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} />
+      <ThemeSelectorModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} onPersist={onPersist} />
     </>
   );
 }

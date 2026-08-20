@@ -21,11 +21,12 @@ import {
   Bell,
   User,
   Receipt,
-  FileText
+  FileText,
+  Sun,
+  Moon
 } from 'lucide-react';
 import { Establishment, Category, MenuItem, Table, Order, OrderItem, OrderStatus } from '../types';
 import { useTheme } from '../theme/ThemeContext';
-import ThemeTriggerButton from './ThemeTriggerButton';
 
 interface ClientViewProps {
   establishmentId: string;
@@ -34,7 +35,7 @@ interface ClientViewProps {
 }
 
 export default function ClientView({ establishmentId, tableId, onBackToLauncher }: ClientViewProps) {
-  const { classes, isDark } = useTheme();
+  const { classes, isDark, applyEstablishmentTheme, setModeOverride } = useTheme();
   // Lang state (RF-C11)
   const [lang, setLang] = useState<'es' | 'en'>('es');
 
@@ -240,6 +241,8 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
         ]);
         if (!cancelled) {
           setEstablishment(estRes);
+          // The diner sees the venue's identity, not whatever this browser last looked at.
+          applyEstablishmentTheme(estRes?.theme, establishmentId);
           setCategories(catRes);
           setMenuItems(menuRes);
           setTables(tabRes);
@@ -717,8 +720,22 @@ export default function ClientView({ establishmentId, tableId, onBackToLauncher 
           </div>
 
           <div className="flex items-center space-x-2">
+            {/* Light/dark comfort toggle. The diner may flip the mode but never the venue's
+                identity (template, color, radius, borders, blur), so this is not the full
+                selector — the choice is stored per establishment in this browser only. */}
+            <button
+              id="btn-toggle-diner-mode"
+              onClick={() => setModeOverride(isDark ? 'light' : 'dark')}
+              // Literal hover classes: `hover:${classes.textPrimary}` would never be emitted,
+              // because Tailwind scans source text and cannot see an interpolated class name.
+              className={`p-2 ${classes.textMuted} ${isDark ? 'hover:text-zinc-100' : 'hover:text-zinc-900'} ${classes.radiusBtn} flex items-center justify-center`}
+              title={isDark ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro'}
+            >
+              {isDark ? <Sun className="w-3.5 h-3.5 text-current" /> : <Moon className="w-3.5 h-3.5 text-current" />}
+            </button>
+
             {/* Lang switcher (RF-C11) */}
-            <button 
+            <button
               id="btn-lang-switcher"
               onClick={() => setLang(prev => prev === 'es' ? 'en' : 'es')}
               className={`p-2 ${classes.textMuted} hover:${classes.textPrimary} ${classes.radiusBtn} flex items-center justify-center text-[10px] font-black uppercase tracking-widest`}

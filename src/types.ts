@@ -1,3 +1,28 @@
+// The venue's visual identity. It lives on the establishment (not in the browser) because the
+// diner who scans the QR has to see the local's style, and because a single global localStorage
+// key leaked one tenant's style into every other tenant open in the same browser.
+// Typed as plain strings on purpose: this interface crosses the wire and is shared with the
+// server, so an unknown value must be sanitized at render time, not crash a type assertion.
+// Valid values, defined in src/theme/themeConfig.ts:
+//   templateId: 'speakeasy-dark' | 'bistro-light' | 'cyber-neon' | 'emerald-gourmet' | 'minimal-slate' | 'sunset-bakery'
+//   mode: 'dark' | 'light'   (no 'system': the venue commits to one concrete identity)
+//   primaryColor: 'amber' | 'orange' | 'emerald' | 'cyan' | 'blue' | 'indigo' | 'purple' | 'rose' | 'red' | 'zinc'
+//   radius: 'sharp' | 'soft' | 'curved' | 'ultra'
+//   borderStyle: 'subtle' | 'glass' | 'bold' | 'glow'
+//   blur: 'none' | 'subtle' | 'glass' | 'deep'
+// null on the last four means "inherit the template's own value".
+// Those four are marked optional only to match what zod infers for `.nullable()` under this
+// project's non-strict tsconfig; the schema itself requires the keys to be present, so a parsed
+// payload never carries a nested undefined into Firestore.
+export interface EstablishmentTheme {
+  templateId: string;
+  mode: 'dark' | 'light';
+  primaryColor?: string | null;
+  radius?: string | null;
+  borderStyle?: string | null;
+  blur?: string | null;
+}
+
 export interface Establishment {
   id: string;
   name: string;
@@ -8,6 +33,7 @@ export interface Establishment {
   openingHours?: string;
   contactPhone?: string;
   kitchenToken?: string | null;
+  theme?: EstablishmentTheme | null;
 }
 
 export interface User {

@@ -1,17 +1,18 @@
-import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
-import { 
-  ThemeTemplate, 
-  ThemeMode, 
-  BorderRadiusPreset, 
-  BorderStylePreset, 
-  BackdropBlurPreset, 
+import React, { createContext, useContext, useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { EstablishmentTheme } from '../types';
+import {
+  ThemeTemplate,
+  ThemeMode,
+  BorderRadiusPreset,
+  BorderStylePreset,
+  BackdropBlurPreset,
   PrimaryColorPreset,
   PrimaryColorConfig,
-  THEME_TEMPLATES, 
+  THEME_TEMPLATES,
   PRIMARY_COLORS_MAP,
-  RADIUS_MAP, 
-  BORDER_MAP, 
-  BLUR_MAP 
+  RADIUS_MAP,
+  BORDER_MAP,
+  BLUR_MAP
 } from './themeConfig';
 
 interface ThemeConfigState {
@@ -23,7 +24,45 @@ interface ThemeConfigState {
   blurOverride: BackdropBlurPreset | null;
 }
 
-const STORAGE_KEY = 'mimenus_theme_template_v1';
+// The whole theme used to live here, under one key with no establishmentId in it. That is the
+// bug: one admin changing the style rewrote what every other tenant saw in the same browser,
+// and nothing ever reached the server, so the diner saw their own browser's theme instead of
+// the venue's. The theme is now server state; the only thing still local is the diner's
+// light/dark comfort override, and it is scoped per tenant.
+const LEGACY_STORAGE_KEY = 'mimenus_theme_template_v1';
+const MODE_OVERRIDE_KEY_PREFIX = 'mimenu_mode_override:';
+
+type ModeOverride = 'dark' | 'light' | null;
+
+function readModeOverride(establishmentId: string): ModeOverride {
+  if (!establishmentId || typeof localStorage === 'undefined') return null;
+  try {
+    const saved = localStorage.getItem(`${MODE_OVERRIDE_KEY_PREFIX}${establishmentId}`);
+    return saved === 'dark' || saved === 'light' ? saved : null;
+  } catch (e) {
+    console.warn('Failed to read mode override', e);
+    return null;
+  }
+}
+
+function writeModeOverride(establishmentId: string, mode: ModeOverride) {
+  if (!establishmentId || typeof localStorage === 'undefined') return;
+  try {
+    const key = `${MODE_OVERRIDE_KEY_PREFIX}${establishmentId}`;
+    if (mode) localStorage.setItem(key, mode);
+    else localStorage.removeItem(key);
+  } catch (e) {
+    console.warn('Failed to save mode override', e);
+  }
+}
+
+// The stored theme crosses the wire as plain strings, and an id that no longer exists (a
+// template renamed, a hand-edited document) must degrade to the preset instead of indexing
+// undefined into RADIUS_MAP / BORDER_MAP / BLUR_MAP and blowing up the render.
+function sanitize<T extends string>(value: string | null | undefined, allowed: Record<string, unknown>): T | null {
+  if (!value) return null;
+  return Object.prototype.hasOwnProperty.call(allowed, value) ? (value as T) : null;
+}
 
 const DEFAULT_STATE: ThemeConfigState = {
   templateId: 'speakeasy-dark',
@@ -33,6 +72,24 @@ const DEFAULT_STATE: ThemeConfigState = {
   borderStyleOverride: null,
   blurOverride: null
 };
+
+// Precedence, in one place: the diner's local mode override wins over the venue's mode, which
+// wins over the device preference ('system'). Everything else is venue identity only — there is
+// no local override for template, color, radius, border or blur by design.
+function configFromVenueTheme(theme: EstablishmentTheme | null | undefined, override: ModeOverride): ThemeConfigState {
+  if (!theme) {
+    return { ...DEFAULT_STATE, mode: override || DEFAULT_STATE.mode };
+  }
+  const knownTemplate = THEME_TEMPLATES.some((t) => t.id === theme.templateId);
+  return {
+    templateId: knownTemplate ? theme.templateId : DEFAULT_STATE.templateId,
+    mode: override || (theme.mode === 'light' ? 'light' : 'dark'),
+    primaryColorOverride: sanitize<PrimaryColorPreset>(theme.primaryColor, PRIMARY_COLORS_MAP),
+    radiusOverride: sanitize<BorderRadiusPreset>(theme.radius, RADIUS_MAP),
+    borderStyleOverride: sanitize<BorderStylePreset>(theme.borderStyle, BORDER_MAP),
+    blurOverride: sanitize<BackdropBlurPreset>(theme.blur, BLUR_MAP)
+  };
+}
 
 interface ThemeContextType {
   templateId: string;
@@ -59,31 +116,72 @@ interface ThemeContextType {
   setBackdropBlur: (blur: BackdropBlurPreset | null) => void;
   resetToPreset: (id?: string) => void;
   toggleMode: () => void;
+  // Called by AdminView / ClientView once the establishment is loaded. The provider wraps the
+  // whole app (including the login screen), so at mount time there is no tenant to read from.
+  applyEstablishmentTheme: (theme: EstablishmentTheme | null | undefined, establishmentId: string) => void;
+  // The user's local light/dark override, scoped per establishment. null = follow the venue.
+  modeOverride: ModeOverride;
+  setModeOverride: (mode: ModeOverride) => void;
 }
 
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined);
 
 export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [config, setConfig] = useState<ThemeConfigState>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        return { ...DEFAULT_STATE, ...JSON.parse(saved) };
-      }
-    } catch (e) {
-      console.warn('Failed to load theme config', e);
-    }
-    return DEFAULT_STATE;
-  });
+  const [config, setConfig] = useState<ThemeConfigState>(DEFAULT_STATE);
+  const [modeOverride, setModeOverrideState] = useState<ModeOverride>(null);
 
-  // Save changes to localStorage
+  // Which tenant + theme is currently applied. Kept in a ref, not state: applyEstablishmentTheme
+  // is called on every catalog refresh, and comparing against state inside a setState callback
+  // would either re-render on every poll or need the value as a dependency, which is exactly the
+  // render loop we want to avoid.
+  const appliedRef = useRef<{ establishmentId: string | null; fingerprint: string | null }>({
+    establishmentId: null,
+    fingerprint: null
+  });
+  const venueThemeRef = useRef<EstablishmentTheme | null>(null);
+  const modeOverrideRef = useRef<ModeOverride>(null);
+
+  // Drop the pre-tenant key. It was global across establishments, which is the bug itself —
+  // keeping it would carry the state that caused the leak into the fixed build.
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+      localStorage.removeItem(LEGACY_STORAGE_KEY);
     } catch (e) {
-      console.warn('Failed to save theme config', e);
+      console.warn('Failed to clear legacy theme key', e);
     }
-  }, [config]);
+  }, []);
+
+  const applyEstablishmentTheme = useCallback(
+    (theme: EstablishmentTheme | null | undefined, establishmentId: string) => {
+      const fingerprint = theme ? JSON.stringify(theme) : null;
+      const sameTenant = appliedRef.current.establishmentId === establishmentId;
+      if (sameTenant && appliedRef.current.fingerprint === fingerprint) return;
+
+      // A different tenant means a different override bucket: re-read that tenant's key instead
+      // of carrying the previous venue's light/dark choice across.
+      const override = sameTenant ? modeOverrideRef.current : readModeOverride(establishmentId);
+
+      appliedRef.current = { establishmentId, fingerprint };
+      venueThemeRef.current = theme || null;
+      if (override !== modeOverrideRef.current) {
+        modeOverrideRef.current = override;
+        setModeOverrideState(override);
+      }
+      setConfig(configFromVenueTheme(theme, override));
+    },
+    []
+  );
+
+  const setModeOverride = useCallback((mode: ModeOverride) => {
+    modeOverrideRef.current = mode;
+    setModeOverrideState(mode);
+    const estId = appliedRef.current.establishmentId;
+    // Before the establishment is known there is nowhere to scope the key, so the choice is
+    // applied for this render only rather than written to a global key.
+    if (estId) writeModeOverride(estId, mode);
+    const venueMode = venueThemeRef.current ? venueThemeRef.current.mode : null;
+    setConfig((prev) => ({ ...prev, mode: mode || venueMode || 'system' }));
+  }, []);
 
   // Active base template
   const activeTemplate = useMemo(() => {
@@ -275,7 +373,10 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setBorderStyle,
         setBackdropBlur,
         resetToPreset,
-        toggleMode
+        toggleMode,
+        applyEstablishmentTheme,
+        modeOverride,
+        setModeOverride
       }}
     >
       {children}

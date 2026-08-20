@@ -1,4 +1,11 @@
 import { z } from 'zod';
+import {
+  THEME_TEMPLATES,
+  PRIMARY_COLORS_MAP,
+  RADIUS_MAP,
+  BORDER_MAP,
+  BLUR_MAP,
+} from '../theme/themeConfig';
 
 // MED-1: strict zod schemas act as a real whitelist for every mutating endpoint.
 // `.strict()` rejects unknown keys, which lets us drop the unsafe `{ ...req.body }`
@@ -90,6 +97,38 @@ export const rotateTableTokenSchema = z
   .strict();
 
 // --- Establishment Configuration ---
+// Venue visual identity. Every value is enumerated against src/theme/themeConfig.ts so a bad
+// payload cannot end up stamped on the tenant and rendered to every diner scanning the QR.
+// 'system' is deliberately absent from `mode`: following the device preference is a per-diner
+// comfort setting kept client-side, not part of the venue's identity.
+// The last four fields are nullable but NOT optional, and that is load-bearing: `forFirestore()`
+// strips undefined only at the top level, so an omitted key inside this nested object would
+// reach Firestore as undefined and fail the whole write. Requiring them means the object that
+// arrives is always complete, and null carries "inherit from the template".
+// Derived from themeConfig.ts rather than retyped: hand-copied lists drift, and both
+// directions of drift fail silently. A value accepted here but missing from the maps gets
+// persisted, discarded on render, and the venue ends up with an identity the panel claims to
+// have saved. A preset added to themeConfig but not here makes saving fail with the generic
+// error message. themeConfig is plain data with zero imports, so the server can read it.
+const themeIds = THEME_TEMPLATES.map((t) => t.id) as [string, ...string[]];
+const colorIds = Object.keys(PRIMARY_COLORS_MAP) as [string, ...string[]];
+const radiusIds = Object.keys(RADIUS_MAP) as [string, ...string[]];
+const borderIds = Object.keys(BORDER_MAP) as [string, ...string[]];
+const blurIds = Object.keys(BLUR_MAP) as [string, ...string[]];
+
+const establishmentThemeSchema = z
+  .object({
+    templateId: z.enum(themeIds),
+    // 'system' is deliberately absent: a venue's identity is a concrete look. Following the
+    // visitor's OS preference is the diner's per-device override, not the venue's choice.
+    mode: z.enum(['dark', 'light']),
+    primaryColor: z.enum(colorIds).nullable(),
+    radius: z.enum(radiusIds).nullable(),
+    borderStyle: z.enum(borderIds).nullable(),
+    blur: z.enum(blurIds).nullable(),
+  })
+  .strict();
+
 export const updateEstablishmentSchema = z
   .object({
     name: z.string().trim().min(2).max(60).optional(),
@@ -107,6 +146,7 @@ export const updateEstablishmentSchema = z
       .optional(),
     openingHours: z.string().max(100).optional(),
     contactPhone: z.string().max(20).optional(),
+    theme: establishmentThemeSchema.optional(),
   })
   .strict();
 export type UpdateEstablishmentInput = z.infer<typeof updateEstablishmentSchema>;

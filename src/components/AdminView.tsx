@@ -53,6 +53,7 @@ import {
   CashClosePreview,
   MetricsSummary,
   TableCloseReceipt,
+  EstablishmentTheme,
 } from '../types';
 import { playNewOrderSound, playAlertSound } from './SoundUtility';
 import { useTheme } from '../theme/ThemeContext';
@@ -83,7 +84,7 @@ type AuthMe = Pick<UserSession, 'email' | 'role' | 'establishmentId'> & {
 };
 
 export default function AdminView({ onBackToLauncher, onSessionExpired }: AdminViewProps) {
-  const { classes, isDark, primaryColorConfig } = useTheme();
+  const { classes, isDark, primaryColorConfig, applyEstablishmentTheme } = useTheme();
 
   // Authentication state
   const [currentUser, setCurrentUser] = useState<AuthMe | null>(null);
@@ -217,11 +218,37 @@ export default function AdminView({ onBackToLauncher, onSessionExpired }: AdminV
         fetch(`/api/establishments/${estId}/menu-items`, { credentials: 'include' }).then(r => r.json()),
       ]);
 
-      if (Array.isArray(estRes)) setEstablishments(estRes);
+      if (Array.isArray(estRes)) {
+        setEstablishments(estRes);
+        // The venue's style is server state now, so the panel has to adopt it once the tenant is
+        // known. Idempotent: the context ignores a repeat of the same theme + id, so the reconcile
+        // interval below does not stomp an unsaved preview or loop renders.
+        const mine = estRes.find((e: Establishment) => e.id === estId);
+        if (mine) applyEstablishmentTheme(mine.theme, mine.id);
+      }
       if (Array.isArray(catRes)) setCategories(catRes);
       if (Array.isArray(menuRes)) setMenuItems(menuRes);
     } catch (err) {
       console.error('Error fetching catalog', err);
+    }
+  };
+
+  // Persist the style as the establishment's identity. Only admins: the endpoint is
+  // requireRole('admin'), so a waiter never gets the button rather than a 403 on click.
+  const persistEstablishmentTheme = async (theme: EstablishmentTheme): Promise<boolean> => {
+    try {
+      const res = await fetch('/api/my/establishment', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ theme }),
+      });
+      if (!res.ok) return false;
+      await fetchCatalog();
+      return true;
+    } catch (err) {
+      console.error('Error saving establishment theme', err);
+      return false;
     }
   };
 
@@ -1065,7 +1092,10 @@ export default function AdminView({ onBackToLauncher, onSessionExpired }: AdminV
 
           <div className="flex items-center gap-3 self-end md:self-auto">
             {/* Style / Theme selector button (visible in admin panel) */}
-            <ThemeTriggerButton variant="inline" />
+            <ThemeTriggerButton
+              variant="inline"
+              onPersist={currentUser.role === 'admin' ? persistEstablishmentTheme : undefined}
+            />
 
             {/* Tone Toggle switch */}
             <button

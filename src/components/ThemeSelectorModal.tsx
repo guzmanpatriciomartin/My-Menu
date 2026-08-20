@@ -15,8 +15,12 @@ import {
   RotateCcw,
   Square,
   Circle,
-  Paintbrush
+  Paintbrush,
+  Save,
+  Loader2,
+  AlertTriangle
 } from 'lucide-react';
+import { EstablishmentTheme } from '../types';
 import { useTheme } from '../theme/ThemeContext';
 import { 
   THEME_TEMPLATES, 
@@ -34,9 +38,12 @@ import {
 interface ThemeSelectorModalProps {
   isOpen: boolean;
   onClose: () => void;
+  // Present only where the caller can actually write the tenant's identity (admin panel).
+  // Without it the modal stays a local preview, which is all a diner is allowed to do.
+  onPersist?: (theme: EstablishmentTheme) => Promise<boolean>;
 }
 
-export default function ThemeSelectorModal({ isOpen, onClose }: ThemeSelectorModalProps) {
+export default function ThemeSelectorModal({ isOpen, onClose, onPersist }: ThemeSelectorModalProps) {
   const { 
     templateId, 
     activeTemplate, 
@@ -60,10 +67,38 @@ export default function ThemeSelectorModal({ isOpen, onClose }: ThemeSelectorMod
 
   const [activeTab, setActiveTab] = useState<'presets' | 'custom'>('presets');
   const [mounted, setMounted] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(false);
 
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  const handlePersist = async () => {
+    if (!onPersist || saving) return;
+    setSaving(true);
+    setSaveError(false);
+    try {
+      // The context exposes effective values (override or the template's own), which is exactly
+      // what identity means here. 'system' is not a venue identity, so it collapses to whatever
+      // the admin is actually looking at right now.
+      const theme: EstablishmentTheme = {
+        templateId,
+        mode: mode === 'system' ? (isDark ? 'dark' : 'light') : mode,
+        primaryColor,
+        radius,
+        borderStyle,
+        blur: backdropBlur
+      };
+      const ok = await onPersist(theme);
+      if (!ok) setSaveError(true);
+    } catch (e) {
+      console.error('Failed to persist establishment theme', e);
+      setSaveError(true);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   if (!mounted) return null;
 
@@ -500,12 +535,35 @@ export default function ThemeSelectorModal({ isOpen, onClose }: ThemeSelectorMod
               </span>
             </div>
 
-            <button
-              onClick={onClose}
-              className={`px-6 py-2.5 text-xs font-bold ${classes.radiusBtn} ${classes.primaryBtn} cursor-pointer`}
-            >
-              Aplicar y Cerrar
-            </button>
+            <div className="flex items-center gap-3">
+              {saveError && (
+                <span className="text-xs font-bold text-red-500 flex items-center gap-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  No se pudo guardar el estilo
+                </span>
+              )}
+
+              {onPersist && (
+                <button
+                  type="button"
+                  id="btn-persist-establishment-theme"
+                  onClick={handlePersist}
+                  disabled={saving}
+                  className={`px-5 py-2.5 text-xs font-bold ${classes.radiusBtn} ${classes.secondaryBtn} cursor-pointer flex items-center gap-1.5 disabled:opacity-60 disabled:cursor-not-allowed`}
+                  title="Guarda este estilo en el local: lo van a ver los comensales que escaneen el QR"
+                >
+                  {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                  <span>{saving ? 'Guardando…' : 'Guardar para mi local'}</span>
+                </button>
+              )}
+
+              <button
+                onClick={onClose}
+                className={`px-6 py-2.5 text-xs font-bold ${classes.radiusBtn} ${classes.primaryBtn} cursor-pointer`}
+              >
+                Aplicar y Cerrar
+              </button>
+            </div>
           </div>
         </motion.div>
         </div>
