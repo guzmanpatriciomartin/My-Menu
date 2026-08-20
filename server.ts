@@ -439,8 +439,12 @@ async function startServer() {
   });
 
   // Current session (rehydration). Returns the profile only — never the token (F-5).
+  // establishmentName is included so the panel can label the venue on first render:
+  // provisioned ids are opaque UUIDs, and falling back to the id shows the user a
+  // meaningless string until the establishments list arrives.
   app.get('/api/auth/me', requireAuth, (req, res) => {
-    res.json(req.user);
+    const est = store.getEstablishment(req.user!.establishmentId);
+    res.json({ ...req.user, establishmentName: est ? est.name : '' });
   });
 
   // Get establishments — protected: only the caller's own tenant (array of 1).

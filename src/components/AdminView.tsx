@@ -75,7 +75,9 @@ interface AdminViewProps {
 // Session shape returned by the server (/api/auth/login and /api/auth/me).
 // The tenant (establishmentId) is authoritative and cannot be changed client-side.
 // The session token is NEVER exposed to JS: auth rides only on the httpOnly cookie (F-5).
-type AuthMe = Pick<UserSession, 'email' | 'role' | 'establishmentId'>;
+type AuthMe = Pick<UserSession, 'email' | 'role' | 'establishmentId'> & {
+  establishmentName?: string;
+};
 
 export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   const { classes, isDark, primaryColorConfig } = useTheme();
@@ -1011,7 +1013,7 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
               id="establishment-active-label"
               className={`${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} text-xs px-3 py-2 ${classes.textPrimary} font-bold`}
             >
-              {activeEstablishment?.name || activeEstId}
+              {activeEstablishment?.name || currentUser.establishmentName || 'Mi local'}
             </span>
           </div>
 
