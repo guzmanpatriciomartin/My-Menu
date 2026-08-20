@@ -82,10 +82,6 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
 
   // Authentication state
   const [currentUser, setCurrentUser] = useState<AuthMe | null>(null);
-  const [loginEmail, setLoginEmail] = useState('carolina@mimenu.com');
-  const [loginPassword, setLoginPassword] = useState('admin');
-  const [loginError, setLoginError] = useState('');
-  const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // Active tenant
   const [activeEstId, setActiveEstId] = useState<string>('bodegon-palermo');
@@ -166,61 +162,32 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
   const soundEnabledRef = useRef(soundEnabled);
   const activeTabRef = useRef(activeTab);
 
-  // Real auth against the server (RF-A01, RF-A13 role validation).
-  const doLogin = async (emailToUse: string, passwordToUse: string) => {
-    setLoginError('');
-    setIsLoggingIn(true);
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ email: emailToUse, password: passwordToUse }),
-      });
-      if (!res.ok) {
-        setLoginError('Credenciales inválidas.');
-        return;
-      }
-      const me: AuthMe = await res.json();
-      setCurrentUser(me);
-      setActiveEstId(me.establishmentId);
-      if (me.role === 'waiter') setActiveTab('monitor'); // Waiter starts on monitor
-    } catch (err) {
-      console.error('Login failed', err);
-      setLoginError('No se pudo conectar con el servidor.');
-    } finally {
-      setIsLoggingIn(false);
-    }
-  };
-
-  const handleLogin = async (e: React.FormEvent) => {
-    e.preventDefault();
-    await doLogin(loginEmail, loginPassword);
-  };
-
   const handleLogout = async () => {
     try {
       await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
     } catch (err) {
       console.error('Logout failed', err);
     }
-    setCurrentUser(null);
+    onBackToLauncher();
   };
 
-  // Rehydrate the session on mount from the httpOnly cookie; if 401, show login.
+  // Rehydrate the session on mount from the httpOnly cookie; if 401, redirect to login.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const res = await fetch('/api/auth/me', { credentials: 'include' });
-        if (!cancelled && res.ok) {
+        if (cancelled) return;
+        if (res.ok) {
           const me: AuthMe = await res.json();
           setCurrentUser(me);
           setActiveEstId(me.establishmentId);
           if (me.role === 'waiter') setActiveTab('monitor');
+        } else {
+          onBackToLauncher();
         }
       } catch (err) {
-        // Not authenticated — the login screen will render.
+        if (!cancelled) onBackToLauncher();
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -1002,187 +969,17 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     img.src = qrUrl;
   };
 
-  // Authenticated login screen with multi-tenant account selection
+  // While the session check is in flight, show a neutral spinner.
+  // If the check fails, onBackToLauncher() is called in the useEffect — this branch
+  // is only reached transiently before the redirect fires.
   if (!currentUser) {
-    const demoAccounts = [
-      {
-        tenant: 'El Bodegón de Palermo',
-        tenantId: 'bodegon-palermo',
-        badge: '🍷 Bodegón',
-        accounts: [
-          { name: 'Carolina', role: 'Admin / Dueña', email: 'carolina@mimenu.com', pass: 'admin', key: 'carolina' },
-          { name: 'Tomás', role: 'Mesero', email: 'tomas@mimenu.com', pass: 'mesero', key: 'tomas' },
-        ]
-      },
-      {
-        tenant: 'Café & Co. Speakeasy',
-        tenantId: 'cafe-speakeasy',
-        badge: '☕ Café Speakeasy',
-        accounts: [
-          { name: 'Martín', role: 'Admin / Encargado', email: 'martin@mimenu.com', pass: 'admin', key: 'martin' },
-          { name: 'Sofía', role: 'Mesera', email: 'sofia@mimenu.com', pass: 'mesero', key: 'sofia' },
-        ]
-      }
-    ];
-
-    const fillAndLogin = (email: string, pass: string) => {
-      setLoginEmail(email);
-      setLoginPassword(pass);
-      setLoginError('');
-      doLogin(email, pass);
-    };
-
-    let selectedUserKey = '';
-    if (loginEmail === 'carolina@mimenu.com') selectedUserKey = 'carolina';
-    else if (loginEmail === 'tomas@mimenu.com') selectedUserKey = 'tomas';
-    else if (loginEmail === 'martin@mimenu.com') selectedUserKey = 'martin';
-    else if (loginEmail === 'sofia@mimenu.com') selectedUserKey = 'sofia';
 
     return (
-      <div className={`min-h-screen ${classes.bgApp} flex flex-col items-center justify-center p-6 selection:bg-amber-500 selection:text-zinc-950 font-sans transition-colors duration-300`}>
-        <div id="login-container" className={`max-w-md w-full ${classes.bgCard} border ${classes.borderCard} ${classes.radiusCard} p-8 relative overflow-hidden shadow-2xl`}>
-          
-          <div className={`absolute top-0 left-0 right-0 h-1 ${primaryColorConfig.accentBg}`}></div>
-
-          <div className="text-center mb-6">
-            <h1 className={`text-xl font-black ${classes.textPrimary} tracking-widest flex items-center justify-center space-x-2.5 uppercase`}>
-              <ClipboardList className={`w-5 h-5 ${primaryColorConfig.textAccent}`} />
-              <span>Mi Menu · Gestión</span>
-            </h1>
-            <p className={`text-[10px] font-mono tracking-wider uppercase ${classes.textMuted} mt-2`}>
-              Soporte multi-establecimiento & comandas QR
-            </p>
-          </div>
-
-          <form onSubmit={handleLogin} className="space-y-5">
-            <div>
-              <label className={`block text-[10px] font-black ${classes.textSecondary} uppercase tracking-widest mb-2 font-mono`}>
-                Seleccionar Establecimiento & Cuenta
-              </label>
-              <select
-                id="demo-user-selector"
-                value={selectedUserKey}
-                disabled={isLoggingIn}
-                className={`w-full ${classes.inputBg} border ${classes.inputBorder} ${classes.radiusCard} p-3.5 text-xs ${classes.textPrimary} focus:outline-none font-mono uppercase tracking-wide cursor-pointer disabled:opacity-50`}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  if (val === 'carolina') fillAndLogin('carolina@mimenu.com', 'admin');
-                  else if (val === 'tomas') fillAndLogin('tomas@mimenu.com', 'mesero');
-                  else if (val === 'martin') fillAndLogin('martin@mimenu.com', 'admin');
-                  else if (val === 'sofia') fillAndLogin('sofia@mimenu.com', 'mesero');
-                }}
-              >
-                <option value="" disabled>-- Selecciona un usuario --</option>
-                <optgroup label="🍷 El Bodegón de Palermo">
-                  <option value="carolina">Carolina (Admin / Dueña)</option>
-                  <option value="tomas">Tomás (Mesero)</option>
-                </optgroup>
-                <optgroup label="☕ Café & Co. Speakeasy">
-                  <option value="martin">Martín (Admin - Café & Co.)</option>
-                  <option value="sofia">Sofía (Mesera - Café & Co.)</option>
-                </optgroup>
-              </select>
-            </div>
-
-            <div>
-              <label className={`block text-[10px] font-black ${classes.textSecondary} uppercase tracking-widest mb-2 font-mono`}>
-                Correo Electrónico
-              </label>
-              <input
-                id="input-login-email"
-                type="email"
-                value={loginEmail}
-                onChange={(e) => setLoginEmail(e.target.value)}
-                disabled={isLoggingIn}
-                className={`w-full ${classes.inputBg} border ${classes.inputBorder} ${classes.radiusCard} p-3.5 text-xs ${classes.textPrimary} focus:outline-none font-medium disabled:opacity-50`}
-                required
-              />
-            </div>
-
-            <div>
-              <label className={`block text-[10px] font-black ${classes.textSecondary} uppercase tracking-widest mb-2 font-mono`}>
-                Contraseña
-              </label>
-              <input
-                id="input-login-password"
-                type="password"
-                value={loginPassword}
-                onChange={(e) => setLoginPassword(e.target.value)}
-                disabled={isLoggingIn}
-                className={`w-full ${classes.inputBg} border ${classes.inputBorder} ${classes.radiusCard} p-3.5 text-xs ${classes.textPrimary} focus:outline-none font-mono disabled:opacity-50`}
-                required
-              />
-            </div>
-
-            {loginError && (
-              <p className={`text-[11px] text-rose-400 bg-rose-950/10 border border-rose-900/30 p-3 ${classes.radiusCard} flex items-center font-medium`}>
-                <AlertTriangle className="w-4 h-4 mr-2 shrink-0 text-rose-400" />
-                {loginError}
-              </p>
-            )}
-
-            <button
-              id="btn-login"
-              type="submit"
-              disabled={isLoggingIn}
-              className={`w-full py-4 ${classes.radiusBtn} ${classes.primaryBtn} font-black text-xs uppercase tracking-[0.2em] cursor-pointer transition-all disabled:opacity-50 flex items-center justify-center space-x-2`}
-            >
-              {isLoggingIn ? (
-                <>
-                  <RefreshCw className="w-4 h-4 animate-spin text-zinc-950" />
-                  <span>Ingresando...</span>
-                </>
-              ) : (
-                <span>Acceder al Panel Admin</span>
-              )}
-            </button>
-          </form>
-
-          {/* Direct Tenant Quick Selection Buttons */}
-          <div className={`mt-6 pt-5 border-t ${classes.borderCard} space-y-3`}>
-            <p className={`text-[10px] font-black ${classes.textMuted} uppercase tracking-widest font-mono`}>
-              Acceso Rápido por Establecimiento:
-            </p>
-            <div className="space-y-3">
-              {demoAccounts.map((group) => (
-                <div key={group.tenantId} className={`${classes.inputBg} border ${classes.inputBorder} ${classes.radiusCard} p-3 space-y-2`}>
-                  <span className="text-[10px] font-bold text-amber-500 font-mono uppercase tracking-wider block">
-                    {group.badge} — {group.tenant}
-                  </span>
-                  <div className="grid grid-cols-2 gap-2">
-                    {group.accounts.map((acc) => (
-                      <button
-                        key={acc.key}
-                        type="button"
-                        onClick={() => fillAndLogin(acc.email, acc.pass)}
-                        className={`text-left p-2 border transition text-[10px] font-mono cursor-pointer ${classes.radiusBtn} ${
-                          loginEmail === acc.email
-                            ? `${classes.bgCard} border-amber-500 ${classes.textPrimary} font-bold shadow-sm`
-                            : `${classes.inputBg} ${classes.borderCard} ${classes.textMuted} hover:${classes.textPrimary}`
-                        }`}
-                      >
-                        <p className={`${classes.textPrimary} font-bold`}>{acc.name} ({acc.role})</p>
-                        <p className={`text-[9px] ${classes.textMuted} truncate`}>{acc.email}</p>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          <div className={`mt-6 pt-4 border-t ${classes.borderCard} flex items-center justify-between text-[10px] ${classes.textMuted} font-mono uppercase tracking-wider`}>
-            <span>MVP v0.2</span>
-            <button 
-              onClick={onBackToLauncher}
-              className={`${classes.textPrimary} hover:underline font-bold`}
-            >
-              Volver al Lanzador
-            </button>
-          </div>
-        </div>
+      <div className="min-h-screen flex items-center justify-center bg-gray-100">
+        <p className="text-gray-500 text-sm">Cargando...</p>
       </div>
     );
+
   }
 
   return (
