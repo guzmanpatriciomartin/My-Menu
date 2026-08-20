@@ -28,6 +28,7 @@ import { logger } from './src/server/logger';
 import {
   loginSchema,
   firebaseLoginSchema,
+  registerSchema,
   createOrderSchema,
   orderLookupSchema,
   updateOrderStatusSchema,
@@ -394,8 +395,15 @@ async function startServer() {
         store.getUserByEmail(decoded.email ?? '') ||
         findUserByEmail(decoded.email ?? '');
 
+      // Authenticated by Firebase but with no tenant record. This is reachable even for a
+      // user who did register: provisionTenant creates the Firebase user before its Firestore
+      // batch and does not roll back, so a failed batch leaves exactly this orphan state.
+      // The code lets the client offer to finish provisioning instead of dead-ending.
       if (!user) {
-        return res.status(401).json({ error: 'Usuario no registrado. Creá tu cuenta primero.' });
+        return res.status(401).json({
+          error: 'Tu cuenta no tiene un local asociado.',
+          code: 'NO_TENANT',
+        });
       }
 
       if ('active' in user && user.active === false) {
@@ -428,6 +436,73 @@ async function startServer() {
       });
     } catch (e: any) {
       logger.warn({ event: 'firebase_login_error', error: e });
+      next(e);
+    }
+  });
+
+  // Provision a tenant onto an EXISTING Firebase account — the recovery path for a user who
+  // authenticates fine but has no establishment (see NO_TENANT above). Unlike /api/provision
+  // this never creates a Firebase user and never accepts a password: identity is proven by
+  // the ID token alone, and the uid is taken from the verified token, never from the body.
+  app.post('/api/auth/register-firebase', loginLimiter, async (req, res, next) => {
+    try {
+      const body = parseBody(registerSchema, req, res);
+      if (!body) return;
+
+      let decoded: Awaited<ReturnType<typeof adminAuth.verifyIdToken>>;
+      try {
+        decoded = await adminAuth.verifyIdToken(body.idToken);
+      } catch {
+        return res.status(401).json({ error: 'Token inválido o expirado' });
+      }
+
+      const email = decoded.email;
+      if (!email) {
+        return res.status(400).json({ error: 'La cuenta de Firebase no tiene un email asociado' });
+      }
+
+      // Refuse if a tenant already exists: this endpoint must not be a way to silently
+      // acquire a second establishment, and re-provisioning would orphan the first one.
+      const existing =
+        store.getUser(decoded.uid) || store.getUserByEmail(email) || findUserByEmail(email);
+      if (existing) {
+        return res.status(409).json({ error: 'Esta cuenta ya tiene un local asociado. Iniciá sesión.' });
+      }
+
+      const result = await provisionTenant({
+        firebaseUid: decoded.uid,
+        email,
+        establishmentName: body.establishmentName,
+        adminName: decoded.name || undefined,
+      });
+
+      const token = jwt.sign(
+        {
+          sub: result.user.id,
+          email: result.user.email,
+          role: result.user.role,
+          establishmentId: result.establishment.id,
+        },
+        SECRET,
+        { expiresIn: SESSION_TTL_SECONDS }
+      );
+
+      res.cookie(SESSION_COOKIE, token, {
+        ...SESSION_COOKIE_OPTIONS,
+        maxAge: SESSION_TTL_SECONDS * 1000,
+      });
+
+      res.status(201).json({
+        user: {
+          email: result.user.email,
+          role: result.user.role,
+          establishmentId: result.establishment.id,
+          name: result.user.name,
+        },
+        establishment: result.establishment,
+      });
+    } catch (e: any) {
+      logger.error({ event: 'register_firebase_error', error: e });
       next(e);
     }
   });

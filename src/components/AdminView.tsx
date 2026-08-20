@@ -70,6 +70,9 @@ import {
 
 interface AdminViewProps {
   onBackToLauncher: () => void;
+  // Called when there is no usable session. Distinct from onBackToLauncher because that one
+  // may land on the demo launcher, whose admin button would mount this component again.
+  onSessionExpired: () => void;
 }
 
 // Session shape returned by the server (/api/auth/login and /api/auth/me).
@@ -79,7 +82,7 @@ type AuthMe = Pick<UserSession, 'email' | 'role' | 'establishmentId'> & {
   establishmentName?: string;
 };
 
-export default function AdminView({ onBackToLauncher }: AdminViewProps) {
+export default function AdminView({ onBackToLauncher, onSessionExpired }: AdminViewProps) {
   const { classes, isDark, primaryColorConfig } = useTheme();
 
   // Authentication state
@@ -170,7 +173,8 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
     } catch (err) {
       console.error('Logout failed', err);
     }
-    onBackToLauncher();
+    // After clearing the cookie the only correct destination is the login screen.
+    onSessionExpired();
   };
 
   // Rehydrate the session on mount from the httpOnly cookie; if 401, redirect to login.
@@ -186,10 +190,10 @@ export default function AdminView({ onBackToLauncher }: AdminViewProps) {
           setActiveEstId(me.establishmentId);
           if (me.role === 'waiter') setActiveTab('monitor');
         } else {
-          onBackToLauncher();
+          onSessionExpired();
         }
       } catch (err) {
-        if (!cancelled) onBackToLauncher();
+        if (!cancelled) onSessionExpired();
       } finally {
         if (!cancelled) setLoading(false);
       }

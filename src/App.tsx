@@ -51,6 +51,19 @@ function MainApp() {
     }
   }, []);
 
+  // A failed session check must always land on login, never on the demo launcher: the
+  // launcher's admin button mounts AdminView again, which fails the same check and bounces
+  // straight back here. That is a loop the user cannot escape by clicking.
+  const handleSessionExpired = () => {
+    try {
+      window.history.pushState({}, '', window.location.pathname);
+    } catch {
+      // safe fallback
+    }
+    setView('login');
+  };
+
+  // Explicit "back to launcher" action — only reachable from inside an authenticated panel.
   const handleBackToLauncher = () => {
     try {
       window.history.pushState({}, '', window.location.pathname);
@@ -72,8 +85,15 @@ function MainApp() {
     setView('client');
   };
 
-  const handleLaunchAdmin = () => {
-    setView('admin');
+  // Check the session here rather than letting AdminView mount and bounce: without this the
+  // demo launcher offers a button that silently returns you to the launcher.
+  const handleLaunchAdmin = async () => {
+    try {
+      const res = await fetch('/api/auth/me', { credentials: 'include' });
+      setView(res.ok ? 'admin' : 'login');
+    } catch {
+      setView('login');
+    }
   };
 
   if (view === 'checking') {
@@ -118,6 +138,7 @@ function MainApp() {
       {view === 'admin' && (
         <AdminView
           onBackToLauncher={handleBackToLauncher}
+          onSessionExpired={handleSessionExpired}
         />
       )}
     </div>

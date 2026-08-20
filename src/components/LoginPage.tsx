@@ -16,6 +16,11 @@ export default function LoginPage({ onLoginSuccess, onGoToRegister }: LoginPageP
   const [error, setError] = useState('');
   const [resetSent, setResetSent] = useState(false);
   const [loading, setLoading] = useState(false);
+  // Set when Firebase authenticated the user but the server has no establishment for them.
+  // Credentials are valid, so instead of dead-ending we ask for the venue name and finish
+  // provisioning onto the account that already exists.
+  const [needsVenue, setNeedsVenue] = useState(false);
+  const [venueName, setVenueName] = useState('');
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -36,6 +41,10 @@ export default function LoginPage({ onLoginSuccess, onGoToRegister }: LoginPageP
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
+        if (data.code === 'NO_TENANT') {
+          setNeedsVenue(true);
+          return;
+        }
         setError(data.error ?? 'No se pudo iniciar sesión. Intentá de nuevo.');
         return;
       }
@@ -58,6 +67,37 @@ export default function LoginPage({ onLoginSuccess, onGoToRegister }: LoginPageP
     }
   }
 
+  // Re-authenticate to get a fresh ID token: the one from handleSubmit may be minutes old by
+  // the time the venue name is typed, and the server verifies expiry.
+  async function handleCreateVenue(e: React.FormEvent) {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    try {
+      const credential = await signInWithEmailAndPassword(auth, email, password);
+      const idToken = await credential.user.getIdToken();
+
+      const res = await fetch('/api/auth/register-firebase', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ idToken, establishmentName: venueName.trim() }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error ?? 'No se pudo crear el local. Intentá de nuevo.');
+        return;
+      }
+
+      onLoginSuccess();
+    } catch {
+      setError('Ocurrió un error. Intentá de nuevo.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
   async function handleForgotPassword() {
     setError('');
     setResetSent(false);
@@ -71,6 +111,54 @@ export default function LoginPage({ onLoginSuccess, onGoToRegister }: LoginPageP
     } catch {
       setError('No se pudo enviar el correo de recuperación.');
     }
+  }
+
+  if (needsVenue) {
+    return (
+      <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
+        <div className="bg-white rounded-2xl shadow-lg w-full max-w-sm p-8">
+          <h1 className="text-2xl font-bold text-gray-800 mb-2 text-center">Falta tu local</h1>
+          <p className="text-sm text-gray-500 text-center mb-6">
+            Tu cuenta existe pero todavía no tiene un local asociado. Poné el nombre y lo creamos.
+          </p>
+
+          <form onSubmit={handleCreateVenue} className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Nombre del local</label>
+              <input
+                type="text"
+                value={venueName}
+                onChange={(e) => setVenueName(e.target.value)}
+                required
+                minLength={2}
+                maxLength={60}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-orange-400"
+                placeholder="La Bodeguita"
+                autoFocus
+              />
+            </div>
+
+            {error && <p className="text-red-600 text-sm">{error}</p>}
+
+            <button
+              type="submit"
+              disabled={loading || venueName.trim().length < 2}
+              className="w-full bg-orange-500 hover:bg-orange-600 text-white font-semibold py-2 rounded-lg transition-colors disabled:opacity-60"
+            >
+              {loading ? 'Creando...' : 'Crear mi local'}
+            </button>
+          </form>
+
+          <button
+            type="button"
+            onClick={() => { setNeedsVenue(false); setError(''); setVenueName(''); }}
+            className="mt-4 w-full text-sm text-gray-500 hover:underline text-center"
+          >
+            Volver
+          </button>
+        </div>
+      </div>
+    );
   }
 
   return (
