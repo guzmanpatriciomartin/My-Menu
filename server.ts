@@ -27,6 +27,7 @@ import { PLANS } from './src/server/plans';
 import { logger } from './src/server/logger';
 import {
   loginSchema,
+  firebaseLoginSchema,
   createOrderSchema,
   orderLookupSchema,
   updateOrderStatusSchema,
@@ -372,27 +373,33 @@ async function startServer() {
     }
   });
 
-  // Firebase Auth token exchange
+  // Firebase Auth token exchange: verify an idToken issued by the client SDK, then issue
+  // our own httpOnly session cookie. The Firebase token is never stored or forwarded.
   app.post('/api/auth/firebase-login', loginLimiter, async (req, res, next) => {
     try {
-      const { idToken } = req.body || {};
-      if (!idToken || typeof idToken !== 'string') {
-        return res.status(400).json({ error: 'idToken es requerido' });
+      const body = parseBody(firebaseLoginSchema, req, res);
+      if (!body) return;
+
+      let decoded: Awaited<ReturnType<typeof adminAuth.verifyIdToken>>;
+      try {
+        decoded = await adminAuth.verifyIdToken(body.idToken);
+      } catch {
+        return res.status(401).json({ error: 'Token inválido o expirado' });
       }
 
-      const decoded = await adminAuth.verifyIdToken(idToken);
-      const email = decoded.email;
-      if (!email) {
-        return res.status(400).json({ error: 'Token no contiene un email válido' });
-      }
+      // Try by uid first (matches when the Firebase UID equals the stored user id),
+      // then fall back to email so previously-provisioned users are always found.
+      const user =
+        store.getUser(decoded.uid) ||
+        store.getUserByEmail(decoded.email ?? '') ||
+        findUserByEmail(decoded.email ?? '');
 
-      let user = store.getUserByEmail(email) || findUserByEmail(email);
       if (!user) {
-        return res.status(404).json({ error: 'Usuario no registrado en la plataforma' });
+        return res.status(401).json({ error: 'Usuario no registrado. Creá tu cuenta primero.' });
       }
 
       if ('active' in user && user.active === false) {
-        return res.status(403).json({ error: 'Usuario inactivo' });
+        return res.status(403).json({ error: 'Usuario inactivo. Contactá al administrador.' });
       }
 
       const token = jwt.sign(
@@ -412,13 +419,16 @@ async function startServer() {
       });
 
       res.json({
-        email: user.email,
-        role: user.role,
-        establishmentId: user.establishmentId,
+        user: {
+          email: user.email,
+          role: user.role,
+          establishmentId: user.establishmentId,
+          name: (user as any).name ?? '',
+        },
       });
     } catch (e: any) {
       logger.warn({ event: 'firebase_login_error', error: e });
-      res.status(401).json({ error: 'Token de autenticación inválido o expirado' });
+      next(e);
     }
   });
 
