@@ -21,3 +21,6 @@ firebase-service-account*.json
 cookies.txt
 *.cookies
 cookiejar*
+
+# Working plan, kept local on purpose
+docs/PLAN_V1.5.md

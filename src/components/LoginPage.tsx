@@ -49,6 +49,19 @@ export default function LoginPage({ onLoginSuccess, onGoToRegister }: LoginPageP
         return;
       }
 
+      // The login can succeed and the session still not stick: the cookie is httpOnly +
+      // SameSite=lax, so an embedded/proxied context or a mismatched host silently drops it.
+      // Without this check the panel mounts, its own /api/auth/me returns 401, and the user
+      // is bounced back here with no explanation — indistinguishable from a wrong password.
+      const check = await fetch('/api/auth/me', { credentials: 'include' });
+      if (!check.ok) {
+        setError(
+          'Tus credenciales son correctas, pero el navegador no guardó la cookie de sesión. ' +
+          'Abrí la app directamente en una pestaña (no dentro de un iframe o vista previa embebida).'
+        );
+        return;
+      }
+
       onLoginSuccess();
     } catch (err: any) {
       const code: string = err?.code ?? '';
