@@ -98,7 +98,11 @@ function isDegraded(firestore: FirestoreHealth): boolean {
 // Over plain HTTP we must stay on Lax: SameSite=None REQUIRES Secure, and a Secure cookie is
 // discarded on http://localhost-style origins, which would break local development outright.
 export function sessionCookieOptions(req: Request) {
-  const isHttps = req.secure; // honours X-Forwarded-Proto via `trust proxy`
+  const isHttps =
+    req.secure ||
+    req.get('x-forwarded-proto') === 'https' ||
+    (req.get('origin')?.startsWith('https://') ?? false) ||
+    (req.get('referer')?.startsWith('https://') ?? false);
   if (isHttps) {
     return {
       httpOnly: true,
@@ -124,9 +128,9 @@ export function sessionCookieOptions(req: Request) {
 // none, and a browser performing a cross-site write always sends one. This is the same
 // trade-off Django and Rails make.
 //
-// Same-origin is computed from the request's own Host, so it works unchanged behind the AI
-// Studio proxy and on Cloud Run without hardcoding either hostname. Extra origins can be
-// allowed via ALLOWED_ORIGINS (comma-separated) for a split frontend deployment.
+// Same-origin is computed from the request's own Host / X-Forwarded-Host, so it works
+// seamlessly behind reverse proxies (AI Studio preview, Cloud Run) and local development.
+// Extra origins can be allowed via ALLOWED_ORIGINS (comma-separated) for a split frontend deployment.
 const EXTRA_ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map((o) => o.trim())
@@ -138,10 +142,67 @@ function requireSameOrigin(req: Request, res: Response, next: NextFunction) {
   const origin = req.get('origin');
   if (!origin) return next();
 
-  const selfOrigin = `${req.protocol}://${req.get('host')}`;
-  if (origin === selfOrigin || EXTRA_ALLOWED_ORIGINS.includes(origin)) return next();
+  let originUrl: URL;
+  try {
+    originUrl = new URL(origin);
+  } catch {
+    logger.warn({ event: 'csrf_origin_invalid', origin });
+    return res.status(403).json({ error: 'Origen inválido' });
+  }
 
-  logger.warn({ event: 'csrf_origin_rejected', origin, path: req.path, method: req.method });
+  const rawHost = (req.get('host') || '').toLowerCase();
+  const forwardedHost = (req.get('x-forwarded-host') || '').toLowerCase();
+  const hostname = (req.hostname || '').toLowerCase();
+  const originHost = originUrl.host.toLowerCase();
+  const originHostname = originUrl.hostname.toLowerCase();
+
+  const isLocalOrigin =
+    originHostname === 'localhost' ||
+    originHostname === '127.0.0.1' ||
+    originHostname === '0.0.0.0';
+
+  const isLocalHost =
+    rawHost.includes('localhost') ||
+    rawHost.includes('127.0.0.1') ||
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1';
+
+  // Matches if the origin host equals raw Host header, X-Forwarded-Host, or req.hostname
+  const matchesHost =
+    originHost === rawHost ||
+    originHost === forwardedHost ||
+    originHostname === hostname ||
+    (isLocalOrigin && isLocalHost);
+
+  // Also support explicit allowed origins (environment variable)
+  const isExplicitlyAllowed = EXTRA_ALLOWED_ORIGINS.some((allowed) => {
+    try {
+      const allowedUrl = new URL(allowed);
+      return allowedUrl.host.toLowerCase() === originHost;
+    } catch {
+      return allowed.toLowerCase() === origin.toLowerCase() || allowed.toLowerCase() === originHost;
+    }
+  });
+
+  // Cloud Run / AI Studio preview environment support: *.run.app / *.google.com
+  const isCloudRunAiStudioOrigin =
+    (originHostname.endsWith('.run.app') || originHostname.endsWith('.google.com')) &&
+    (isLocalHost || forwardedHost.endsWith('.run.app') || rawHost.endsWith('.run.app') || forwardedHost === originHost);
+
+  if (matchesHost || isExplicitlyAllowed || isCloudRunAiStudioOrigin) {
+    return next();
+  }
+
+  logger.warn({
+    event: 'csrf_origin_rejected',
+    origin,
+    rawHost,
+    forwardedHost,
+    hostname,
+    protocol: req.protocol,
+    path: req.path,
+    method: req.method,
+  });
   return res.status(403).json({ error: 'Origen no permitido' });
 }
 

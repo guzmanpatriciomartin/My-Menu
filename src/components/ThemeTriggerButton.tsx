@@ -22,11 +22,11 @@ export default function ThemeTriggerButton({ className = '', variant = 'floating
           type="button"
           id="btn-open-theme-selector-inline"
           onClick={() => setIsModalOpen(true)}
-          className={`flex items-center space-x-2 px-3.5 py-2 text-xs font-mono font-bold ${classes.radiusBtn} ${classes.primaryBtn} transition-all cursor-pointer shadow-md ${className}`}
+          className={`flex items-center justify-center p-2 text-xs ${classes.radiusBtn} ${classes.primaryBtn} transition-all cursor-pointer shadow-md ${className}`}
           title="Editar estilo del sitio"
+          aria-label="Editar estilo del sitio"
         >
           <Settings className="w-4 h-4" />
-          <span>Editar estilo</span>
         </button>
 
         <ThemeSelectorModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} onPersist={onPersist} />
