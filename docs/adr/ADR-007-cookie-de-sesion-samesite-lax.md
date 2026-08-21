@@ -1,6 +1,11 @@
 # ADR-007 — La cookie de sesión se queda en `SameSite=Lax`: el preview embebido de AI Studio no es un entorno soportado
 
-- **Estado:** aceptado
+- **Estado:** **superado por [ADR-008](ADR-008-csrf-por-origin-y-cookie-particionada.md)**
+  (2026-08-21). Este ADR asumió que el preview embebido era un artefacto de desarrollo y no el
+  entorno de trabajo real; esa premisa era falsa. ADR-008 habilita `SameSite=None` después de
+  implementar la verificación de `Origin` que este documento identificó como prerrequisito.
+  El análisis de abajo sigue siendo válido y vale leerlo: enumera los tres POST alcanzables por
+  CSRF y explica por qué `Authorization: Bearer` no es una opción.
 - **Fecha:** 2026-08-20
 - **Afecta:** `server.ts` (`SESSION_COOKIE_OPTIONS`), `src/server/auth.ts` (comentario de F-5),
   `src/components/LoginPage.tsx` (chequeo post-login)

@@ -24,15 +24,16 @@ export default function LoginPage({ onLoginSuccess, onGoToRegister }: LoginPageP
 
   // Shared by both auth paths: a 200 login does not guarantee a usable session.
   async function finishLogin(): Promise<boolean> {
-    // The cookie is httpOnly + SameSite=lax, so an embedded/proxied context or a mismatched
-    // host silently drops it. Without this check the panel mounts, its own /api/auth/me
-    // returns 401, and the user is bounced back here with no explanation — indistinguishable
-    // from a wrong password.
+    // A 200 login does not guarantee a usable session: the browser can still refuse the
+    // cookie. Over HTTPS it is sent SameSite=None; Secure; Partitioned so it survives an
+    // embedded context (ADR-008), but a browser without CHIPS support — Safari — drops it
+    // anyway. Without this check the panel mounts, its own /api/auth/me returns 401, and the
+    // user is bounced back here with no explanation, indistinguishable from a wrong password.
     const check = await fetch('/api/auth/me', { credentials: 'include' });
     if (!check.ok) {
       setError(
         'Tus credenciales son correctas, pero el navegador no guardó la cookie de sesión. ' +
-        'Abrí la app directamente en una pestaña (no dentro de un iframe o vista previa embebida).'
+        'Si estás dentro de una vista previa embebida, probá en Chrome o abrí la app en una pestaña propia.'
       );
       return false;
     }

@@ -81,14 +81,69 @@ function isDegraded(firestore: FirestoreHealth): boolean {
   );
 }
 
-// Cookie attributes shared by the login (set) and logout (clear) so the browser
-// actually removes the cookie — clearCookie only matches when path/sameSite/etc align.
-const SESSION_COOKIE_OPTIONS = {
-  httpOnly: true,
-  sameSite: 'lax' as const,
-  secure: process.env.NODE_ENV === 'production',
-  path: '/',
-};
+// Cookie attributes, derived PER REQUEST so login (set) and logout (clear) always agree —
+// clearCookie only removes the cookie when path/sameSite/secure/partitioned all match.
+//
+// Over HTTPS we send SameSite=None so the session survives inside a third-party context
+// (the AI Studio preview embeds the app in an iframe under aistudio.google.com; with Lax the
+// browser silently drops the cookie and every request looks unauthenticated). ADR-007 rejected
+// this precisely because SameSite was the ONLY CSRF defense; requireSameOrigin below now
+// provides that defense independently, which is what makes None acceptable — see ADR-008.
+//
+// Partitioned (CHIPS) is set alongside None because Chrome is phasing out unpartitioned
+// third-party cookies; without it this stops working on its own schedule. The cost is that
+// the embedded session and the own-tab session are two different cookies, so signing in to
+// one does not sign you in to the other.
+//
+// Over plain HTTP we must stay on Lax: SameSite=None REQUIRES Secure, and a Secure cookie is
+// discarded on http://localhost-style origins, which would break local development outright.
+export function sessionCookieOptions(req: Request) {
+  const isHttps = req.secure; // honours X-Forwarded-Proto via `trust proxy`
+  if (isHttps) {
+    return {
+      httpOnly: true,
+      sameSite: 'none' as const,
+      secure: true,
+      partitioned: true,
+      path: '/',
+    };
+  }
+  return {
+    httpOnly: true,
+    sameSite: 'lax' as const,
+    secure: false,
+    path: '/',
+  };
+}
+
+// CSRF defense that does not depend on SameSite. Applied to every state-changing request:
+// a cross-site form POST (the shape SameSite=Lax used to block) always carries an Origin
+// header in modern browsers, so a mismatch is rejected before any handler runs.
+//
+// A missing Origin is allowed through on purpose: curl and other programmatic clients send
+// none, and a browser performing a cross-site write always sends one. This is the same
+// trade-off Django and Rails make.
+//
+// Same-origin is computed from the request's own Host, so it works unchanged behind the AI
+// Studio proxy and on Cloud Run without hardcoding either hostname. Extra origins can be
+// allowed via ALLOWED_ORIGINS (comma-separated) for a split frontend deployment.
+const EXTRA_ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+function requireSameOrigin(req: Request, res: Response, next: NextFunction) {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next();
+
+  const origin = req.get('origin');
+  if (!origin) return next();
+
+  const selfOrigin = `${req.protocol}://${req.get('host')}`;
+  if (origin === selfOrigin || EXTRA_ALLOWED_ORIGINS.includes(origin)) return next();
+
+  logger.warn({ event: 'csrf_origin_rejected', origin, path: req.path, method: req.method });
+  return res.status(403).json({ error: 'Origen no permitido' });
+}
 
 // F-7: validate a request body against a strict zod schema. On failure responds 400
 // with only the offending field names (never the raw zod error, which can leak internals).
@@ -152,6 +207,11 @@ async function startServer() {
     message: { error: 'Demasiados intentos. Probá de nuevo más tarde.' },
   });
   app.use('/api', apiLimiter);
+
+  // Mounted before every route so no mutating endpoint can be added without this check.
+  // This is what replaces SameSite=Lax as the CSRF defense (ADR-008), which is what allows
+  // the session cookie to use SameSite=None and survive the embedded preview.
+  app.use('/api', requireSameOrigin);
 
   // SSE stream — segmented per tenant/table (F-6). Soft auth: a valid session cookie
   // makes this an 'admin' subscriber (all tenant events); otherwise it must be a diner
@@ -306,7 +366,7 @@ async function startServer() {
       );
 
       res.cookie(SESSION_COOKIE, token, {
-        ...SESSION_COOKIE_OPTIONS,
+        ...sessionCookieOptions(req),
         maxAge: SESSION_TTL_SECONDS * 1000,
       });
 
@@ -359,7 +419,7 @@ async function startServer() {
       );
 
       res.cookie(SESSION_COOKIE, token, {
-        ...SESSION_COOKIE_OPTIONS,
+        ...sessionCookieOptions(req),
         maxAge: SESSION_TTL_SECONDS * 1000,
       });
 
@@ -422,7 +482,7 @@ async function startServer() {
       );
 
       res.cookie(SESSION_COOKIE, token, {
-        ...SESSION_COOKIE_OPTIONS,
+        ...sessionCookieOptions(req),
         maxAge: SESSION_TTL_SECONDS * 1000,
       });
 
@@ -488,7 +548,7 @@ async function startServer() {
       );
 
       res.cookie(SESSION_COOKIE, token, {
-        ...SESSION_COOKIE_OPTIONS,
+        ...sessionCookieOptions(req),
         maxAge: SESSION_TTL_SECONDS * 1000,
       });
 
@@ -509,7 +569,7 @@ async function startServer() {
 
   // Logout: clear the session cookie using the SAME attributes it was set with.
   app.post('/api/auth/logout', (req, res) => {
-    res.clearCookie(SESSION_COOKIE, SESSION_COOKIE_OPTIONS);
+    res.clearCookie(SESSION_COOKIE, sessionCookieOptions(req));
     res.json({ success: true });
   });
 
